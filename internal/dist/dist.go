@@ -3,7 +3,7 @@
 // ship one crosstalkd, and every client that can reach its ip:port can
 // bootstrap itself from it.
 //
-// The assets directory is populated by cli.sh (or a release build) before
+// The assets directory is populated by run.sh (or a release build) before
 // the server is compiled. A dev server built without the matrix serves 404
 // for missing binaries but still works fully as a hub.
 package dist

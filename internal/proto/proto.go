@@ -9,7 +9,7 @@ import "time"
 const ProtoVersion = "1"
 
 // Version is the semantic version of both binaries. Build is the exact
-// build identity (git describe), injected at link time by cli.sh via
+// build identity (git describe), injected at link time by run.sh via
 // -ldflags "-X crosstalk/internal/proto.Build=...". Two binaries are the
 // same tool iff both fields match — `crosstalk update` compares both, so
 // a rebuilt server pushes new clients even within one version number.

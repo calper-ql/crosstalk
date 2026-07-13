@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# cli.sh — build crosstalk and run the server in the foreground.
+# run.sh — build crosstalk and run the server in the foreground.
 #
 # First run generates ./run/crosstalkd.toml with a fresh token; later runs
 # reuse it, so the token and the TLS cert (and every client's pin) survive
 # restarts. Ctrl-C stops the server.
 #
-#   ./cli.sh                               # bind 127.0.0.1:27677 (this machine only)
-#   CROSSTALK_BIND=0.0.0.0:27677 ./cli.sh  # expose to the whole subnet (deliberate)
+#   ./run.sh                               # bind 127.0.0.1:27677 (this machine only)
+#   CROSSTALK_BIND=0.0.0.0:27677 ./run.sh  # expose to the whole subnet (deliberate)
 #
 # The default is loopback-only: exposing the server fleet-wide is an explicit
 # opt-in, matching the design's "no default bind" principle. An existing

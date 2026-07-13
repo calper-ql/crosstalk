@@ -35,7 +35,7 @@ func handleBinary(w http.ResponseWriter, r *http.Request) {
 	data, ok := dist.Asset(name)
 	if !ok {
 		writeErr(w, http.StatusNotFound, proto.ErrNotFound,
-			"this server build does not carry "+name+" — rebuild crosstalkd with the release matrix (cli.sh)")
+			"this server build does not carry "+name+" — rebuild crosstalkd with the release matrix (run.sh)")
 		return
 	}
 	if name == "SHA256SUMS" {

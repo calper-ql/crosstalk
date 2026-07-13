@@ -93,9 +93,14 @@ type model struct {
 	status string
 	ready  bool
 
-	// Sidebar sections scroll independently; offsets are in lines.
+	// Sidebar layout: draggable width, independent per-section scroll,
+	// and a rooms filter.
+	sbW         int // sidebar width in columns; dragged via the divider
+	dragging    bool
 	roomsScroll int
 	whoScroll   int
+	search      textinput.Model
+	searching   bool // search box has focus (keys filter rooms, not chat)
 
 	// @-autocomplete popup state.
 	mentionOpen bool
@@ -125,7 +130,12 @@ func newModel(conn *client.Conn, alias, name, hostname string) model {
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 16 * 1024
-	ta.Focus() // the input is always focused; rooms are clicked
+	ta.Focus() // the message input is focused by default; rooms are clicked
+
+	sr := textinput.New()
+	sr.Prompt = "/ " // ascii-safe search affordance (renders everywhere)
+	sr.Placeholder = "search rooms"
+	sr.CharLimit = 32
 
 	return model{
 		conn:      conn,
@@ -135,8 +145,39 @@ func newModel(conn *client.Conn, alias, name, hostname string) model {
 		needName:  name == "",
 		nameInput: ti,
 		ta:        ta,
+		search:    sr,
+		sbW:       defaultSidebarW,
 		joined:    map[string]*roomView{},
 	}
+}
+
+// filteredRooms is the room list narrowed by the search box (case-insensitive
+// substring on the room name); the full list when the box is empty.
+func (m model) filteredRooms() []proto.RoomInfo {
+	q := strings.ToLower(strings.TrimSpace(m.search.Value()))
+	if q == "" {
+		return m.rooms
+	}
+	out := m.rooms[:0:0]
+	for _, r := range m.rooms {
+		if strings.Contains(strings.ToLower(r.Name), q) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// clampSidebar keeps the draggable divider within sane bounds: wide enough
+// to show room names, leaving room for the chat pane.
+func clampSidebar(x, total int) int {
+	maxW := total - 30
+	if x < minSidebarW {
+		x = minSidebarW
+	}
+	if maxW >= minSidebarW && x > maxW {
+		x = maxW
+	}
+	return x
 }
 
 func (m model) Init() tea.Cmd {
@@ -416,6 +457,30 @@ func (m model) updateNamePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Search box focused: keystrokes filter the room list.
+	if m.searching {
+		switch msg.String() {
+		case "ctrl+q", "ctrl+c":
+			return m, tea.Quit
+		case "esc":
+			m.search.SetValue("")
+			return m.blurSearch()
+		case "enter":
+			rooms := m.filteredRooms()
+			mm, cmd := m.blurSearch()
+			m = mm.(model)
+			if len(rooms) > 0 {
+				m2, cmd2 := m.openRoom(rooms[0].Name)
+				return m2, tea.Batch(cmd, cmd2)
+			}
+			return m, cmd
+		}
+		var cmd tea.Cmd
+		m.search, cmd = m.search.Update(msg)
+		m.roomsScroll = 0 // a narrowed list starts from the top
+		return m, cmd
+	}
+
 	// An open autocomplete popup (@mention or :emoji:) captures navigation
 	// and completion keys before anything else.
 	if m.mentionOpen || m.emojiOpen {
@@ -485,24 +550,37 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Dragging the sidebar/chat divider takes precedence over everything.
+	if m.dragging {
+		if msg.Action == tea.MouseActionRelease {
+			m.dragging = false
+			return m, nil
+		}
+		m.sbW = clampSidebar(msg.X, m.width)
+		m.layout()
+		m.refreshViewport(m.vp.AtBottom())
+		return m, nil
+	}
+
+	roomsBottom := roomsTopRow + m.roomsSectionHeight() // first row past the room list
+
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
-		if msg.X >= sidebarWidth {
+		if msg.X > m.sbW {
 			m.vp.LineUp(3)
 			return m.maybeBackfill()
 		}
-		// Sidebar: scroll whichever section the cursor is over.
-		if msg.Y <= sidebarHeaderLines+m.roomsSectionHeight() {
+		if msg.Y < roomsBottom {
 			m.roomsScroll = max(0, m.roomsScroll-3)
 		} else {
 			m.whoScroll = max(0, m.whoScroll-3)
 		}
 	case tea.MouseButtonWheelDown:
-		if msg.X >= sidebarWidth {
+		if msg.X > m.sbW {
 			m.vp.LineDown(3)
 			return m, nil
 		}
-		if msg.Y <= sidebarHeaderLines+m.roomsSectionHeight() {
+		if msg.Y < roomsBottom {
 			m.roomsScroll += 3 // clamped against content at render time
 		} else {
 			m.whoScroll += 3
@@ -511,28 +589,69 @@ func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if msg.Action != tea.MouseActionPress {
 			return m, nil
 		}
+		// The divider column (the sidebar's right border) starts a drag.
+		if msg.X == m.sbW || msg.X == m.sbW-1 {
+			m.dragging = true
+			return m, nil
+		}
 		// Exit button, bottom-right corner of the status row.
 		if msg.Y == m.height-1 && msg.X >= m.width-lipglossWidth(exitButtonLabel) {
 			return m, tea.Quit
 		}
-		// Rooms are clicked, not keyboard-navigated. The click maps
-		// through the section's scroll offset.
-		if msg.X < sidebarWidth {
-			idx := msg.Y - sidebarHeaderLines + m.roomsScroll
-			if msg.Y >= sidebarHeaderLines && msg.Y < sidebarHeaderLines+m.roomsSectionHeight() &&
-				idx >= 0 && idx < len(m.rooms) {
-				return m.openRoom(m.rooms[idx].Name)
+		// Clicking the search box (row 1 of the sidebar) focuses it.
+		if msg.X < m.sbW && msg.Y == 1 {
+			return m.focusSearch()
+		}
+		// Clicking anywhere else in the chat/message pane returns focus to
+		// the message input.
+		if msg.X > m.sbW {
+			return m.blurSearch()
+		}
+		// Rooms are clicked, not keyboard-navigated. The click maps through
+		// the filtered list and the section's scroll offset.
+		if msg.X < m.sbW && msg.Y >= roomsTopRow && msg.Y < roomsBottom {
+			rooms := m.filteredRooms()
+			idx := msg.Y - roomsTopRow + m.roomsScroll
+			if idx >= 0 && idx < len(rooms) {
+				mm, cmd := m.blurSearch()
+				m = mm.(model)
+				m2, cmd2 := m.openRoom(rooms[idx].Name)
+				return m2, tea.Batch(cmd, cmd2)
 			}
 		}
 	}
 	return m, nil
 }
 
+// focusSearch moves keyboard focus to the rooms filter.
+func (m model) focusSearch() (tea.Model, tea.Cmd) {
+	if m.searching {
+		return m, nil
+	}
+	m.searching = true
+	m.ta.Blur()
+	return m, m.search.Focus()
+}
+
+// blurSearch returns keyboard focus to the message input and clears the
+// filter, so the full room list is always restored on leaving the box.
+func (m model) blurSearch() (tea.Model, tea.Cmd) {
+	if !m.searching {
+		return m, nil
+	}
+	m.searching = false
+	m.search.SetValue("")
+	m.search.Blur()
+	m.roomsScroll = 0
+	return m, m.ta.Focus()
+}
+
 // roomsSectionHeight is the line budget of the sidebar's top (rooms)
 // section; the occupants section gets the rest below the separator.
 func (m model) roomsSectionHeight() int {
-	// total sidebar lines minus: rooms header, separator, occupants header
-	avail := m.height - statusHeight - 3
+	// total sidebar lines minus: rooms header, search box, separator,
+	// occupants header
+	avail := m.height - statusHeight - 4
 	if avail < 2 {
 		return 1
 	}
@@ -540,7 +659,7 @@ func (m model) roomsSectionHeight() int {
 }
 
 func (m model) whoSectionHeight() int {
-	avail := m.height - statusHeight - 3
+	avail := m.height - statusHeight - 4
 	h := avail - m.roomsSectionHeight()
 	if h < 1 {
 		return 1

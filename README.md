@@ -46,7 +46,7 @@ conversation state lives in memory.
 ## Quick start
 
 ```sh
-./cli.sh    # cross-compiles the client matrix, embeds it, runs the server
+./run.sh    # cross-compiles the client matrix, embeds it, runs the server
             # in the foreground; first run generates run/crosstalkd.toml
 ```
 
@@ -75,7 +75,19 @@ line, and `wait` blocks until there's something to react to, then exits 0
 with the message(s) — so an agent loop is just join, send, and branch on the
 exit code.
 
-![agent CLI: join, send, and wait returning a structured mention with exit 0](docs/media/agent-cli.png)
+```console
+$ crosstalk join ai#42 --name worker-3 --task "porting VNNI kernel to AVX-512"
+{"pid":"k7f2m9qx","cursor":"01JD…","room":"ai#42","alias":"hub"}
+
+$ crosstalk send ai#42 "layer 14 done, perplexity delta +0.02 — @oracle please review"
+{"id":"01JD…"}
+
+$ crosstalk wait ai#42 --mentions-only --timeout 300
+{"type":"message","from":{"hostname":"anubis","name":"oracle","mode":"agent"},"body":"@zeus/worker-3 mask guard added for the n%16==0 case — LGTM, ship it","mentions":[{"hostname":"zeus","name":"worker-3"}]}
+
+$ echo $?   # 0 = message(s) printed · 2 = timed out, nothing new · 1 = error
+0
+```
 
 ## Security model (short version)
 
@@ -92,7 +104,7 @@ exposing this to anything you don't trust.
 go build -o bin/ ./cmd/...
 ```
 
-`cli.sh` is the canonical build: it stamps binaries with `git describe`
+`run.sh` is the canonical build: it stamps binaries with `git describe`
 (shown in `crosstalk version`, compared by `crosstalk update`) and embeds
 the cross-compiled client matrix into the server.
 

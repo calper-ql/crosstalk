@@ -13,10 +13,13 @@ import (
 )
 
 const (
-	sidebarWidth       = 28
-	sidebarHeaderLines = 1
-	inputHeight        = 3
-	statusHeight       = 1
+	defaultSidebarW = 28
+	minSidebarW     = 18
+	// roomsTopRow is the first sidebar row occupied by the room list — below
+	// the section header and the search box.
+	roomsTopRow  = 2
+	inputHeight  = 3
+	statusHeight = 1
 )
 
 // exitButtonLabel sits in the bottom-right corner; it is the one place the
@@ -32,8 +35,9 @@ var (
 	cHuman  = lipgloss.AdaptiveColor{Light: "29", Dark: "78"}
 	cAlert  = lipgloss.AdaptiveColor{Light: "160", Dark: "204"}
 
-	sSidebar     = lipgloss.NewStyle().Width(sidebarWidth).BorderStyle(lipgloss.NormalBorder()).BorderRight(true).BorderForeground(cDim)
+	sSidebar     = lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).BorderRight(true).BorderForeground(cDim)
 	sSideHeader  = lipgloss.NewStyle().Bold(true).Foreground(cAccent).Padding(0, 1)
+	sSearch      = lipgloss.NewStyle().Padding(0, 1)
 	sRoom        = lipgloss.NewStyle().Padding(0, 1)
 	sRoomActive  = lipgloss.NewStyle().Padding(0, 1).Bold(true).Foreground(cAccent)
 	sRoomSel     = lipgloss.NewStyle().Padding(0, 1).Reverse(true)
@@ -94,9 +98,14 @@ func sortRooms(rooms []proto.RoomInfo) []proto.RoomInfo {
 	return out
 }
 
-// layout recomputes component sizes from the window size.
+// layout recomputes component sizes from the window size and the current
+// (draggable) sidebar width.
 func (m *model) layout() {
-	chatWidth := m.width - sidebarWidth
+	if m.sbW == 0 {
+		m.sbW = defaultSidebarW
+	}
+	m.sbW = clampSidebar(m.sbW, m.width)
+	chatWidth := m.width - m.sbW - 1 // -1 for the sidebar's right border
 	if chatWidth < 20 {
 		chatWidth = 20
 	}
@@ -107,6 +116,7 @@ func (m *model) layout() {
 	m.vp.Width = chatWidth
 	m.vp.Height = vpHeight
 	m.ta.SetWidth(chatWidth - 2)
+	m.search.Width = m.sbW - 5
 }
 
 // refreshViewport re-renders the active room into the viewport.
@@ -261,12 +271,18 @@ func (m model) View() string {
 // sections — rooms above, active-room occupants below — split by a
 // separator at the middle.
 func (m *model) viewSidebar() string {
-	// Top section: room rows.
+	sbW := m.sbW
+	// Top section: room rows (filtered by the search box).
+	rooms := m.filteredRooms()
 	var roomRows []string
-	if len(m.rooms) == 0 {
-		roomRows = append(roomRows, sDim.Render(" no rooms yet"))
+	if len(rooms) == 0 {
+		if strings.TrimSpace(m.search.Value()) != "" {
+			roomRows = append(roomRows, sDim.Render(" no matches"))
+		} else {
+			roomRows = append(roomRows, sDim.Render(" no rooms yet"))
+		}
 	}
-	for _, r := range m.rooms {
+	for _, r := range rooms {
 		name := r.Name
 		// Right-aligned cluster: an optional unread/mention badge, then the
 		// participant count flush to the right edge.
@@ -280,7 +296,7 @@ func (m *model) viewSidebar() string {
 		}
 		// Name flush left, meta flush right, filled with spaces between; the
 		// name is truncated first if the two would collide.
-		maxw := sidebarWidth - 3
+		maxw := sbW - 3
 		metaW := lipgloss.Width(meta)
 		if lipgloss.Width(name)+metaW+1 > maxw {
 			name = name[:max(1, maxw-metaW-2)] + "…"
@@ -302,8 +318,8 @@ func (m *model) viewSidebar() string {
 	whoTitle := "in —"
 	if rv := m.joined[m.active]; rv != nil {
 		roomLabel := m.active
-		if lipgloss.Width(roomLabel) > sidebarWidth-8 {
-			roomLabel = roomLabel[:sidebarWidth-9] + "…"
+		if lipgloss.Width(roomLabel) > sbW-8 {
+			roomLabel = roomLabel[:sbW-9] + "…"
 		}
 		whoTitle = "in " + roomLabel
 		now := time.Now()
@@ -313,13 +329,13 @@ func (m *model) viewSidebar() string {
 				marker = sDim.Render("○")
 			}
 			name := p.Identity.Display()
-			if lipgloss.Width(name) > sidebarWidth-5 {
-				name = name[:sidebarWidth-6] + "…"
+			if lipgloss.Width(name) > sbW-5 {
+				name = name[:sbW-6] + "…"
 			}
 			whoRows = append(whoRows, " "+marker+" "+idColor(p.Identity.Hostname, p.Identity.Name).Render(name))
 			if t := p.Identity.Task; t != "" {
-				if lipgloss.Width(t) > sidebarWidth-6 {
-					t = t[:sidebarWidth-7] + "…"
+				if lipgloss.Width(t) > sbW-6 {
+					t = t[:sbW-7] + "…"
 				}
 				whoRows = append(whoRows, sDim.Render("   "+t))
 			}
@@ -333,14 +349,16 @@ func (m *model) viewSidebar() string {
 	var b strings.Builder
 	b.WriteString(sSideHeader.Render(m.alias + " · rooms" + scrollMark(m.roomsScroll, len(roomRows), topH)))
 	b.WriteString("\n")
+	b.WriteString(sSearch.Render(m.search.View()))
+	b.WriteString("\n")
 	b.WriteString(strings.Join(window(roomRows, m.roomsScroll, topH), "\n"))
 	b.WriteString("\n")
-	b.WriteString(sDim.Render(strings.Repeat("─", sidebarWidth-1)))
+	b.WriteString(sDim.Render(strings.Repeat("─", sbW-1)))
 	b.WriteString("\n")
 	b.WriteString(sSideHeader.Render(whoTitle + scrollMark(m.whoScroll, len(whoRows), botH)))
 	b.WriteString("\n")
 	b.WriteString(strings.Join(window(whoRows, m.whoScroll, botH), "\n"))
-	return m.fitColumn(sSidebar, b.String())
+	return m.fitColumn(sSidebar.Width(sbW), b.String())
 }
 
 // window returns rows[off:off+h] padded with blanks to exactly h lines.
