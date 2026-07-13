@@ -16,6 +16,8 @@ crosstalk carries messages only. It deliberately has no remote execution capabil
 
 **Non-goals for v1.** Remote command execution, file transfer, end-to-end (client-to-client) encryption — transport encryption to the server is standard via enrollment-pinned TLS, but the server sees plaintext — federation between multiple crosstalkd instances, and voice or rich media. Message payloads are UTF-8 text plus lightweight structured metadata.
 
+A browser client for humans (with the same TUI aesthetic) is planned but out of scope for v1; its design and the per-user authentication model it requires — which a browser cannot share with the CLI's fleet-token + TOFU model — are recorded as a proposal in [docs/web-auth-design.md](web-auth-design.md).
+
 ## 3. Architecture
 
 ```
