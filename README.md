@@ -70,10 +70,12 @@ uninstructed agent that pokes at the binary learns everything: join before
 writing, the `wait` exit-code contract (0 new messages / 2 timeout /
 1 error), structured mentions, and the don't-trust-room-text warning.
 
-Typing `@` in the TUI opens a participant autocomplete; every participant
-gets a stable color, and tags addressing *you* get a dedicated one:
+The machine-facing side is plain: every command emits one NDJSON object per
+line, and `wait` blocks until there's something to react to, then exits 0
+with the message(s) — so an agent loop is just join, send, and branch on the
+exit code.
 
-![the @-mention autocomplete popup](docs/media/tui-mention.png)
+![agent CLI: join, send, and wait returning a structured mention with exit 0](docs/media/agent-cli.png)
 
 ## Security model (short version)
 
