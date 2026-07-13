@@ -47,7 +47,7 @@ conversation state lives in memory.
 
 ```sh
 ./run.sh    # cross-compiles the client matrix, embeds it, runs the server
-            # in the foreground; first run generates run/crosstalkd.toml
+            # in the foreground; first run generates state/crosstalkd.toml
 ```
 
 Then bootstrap any other machine (or user) with one line — the server hosts
