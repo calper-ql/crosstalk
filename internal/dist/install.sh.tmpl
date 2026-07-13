@@ -1,0 +1,97 @@
+#!/bin/sh
+# crosstalk installer — served by crosstalkd, which baked in its own
+# address below. Safe to re-run: registration is an upsert and only the
+# binary is replaced.
+#
+#   curl -fsSLk https://__SERVER_HOST__:__SERVER_PORT__/install.sh | sh -s -- --token <TOKEN> [--alias hub]
+#
+# The server's TLS certificate is self-signed (clients pin it at register
+# time), hence the -k on the bootstrap fetch.
+set -eu
+
+HOST="__SERVER_HOST__"
+PORT="__SERVER_PORT__"
+BASE="https://$HOST:$PORT"
+TOKEN=""
+ALIAS="default"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --token) TOKEN="$2"; shift 2 ;;
+        --alias) ALIAS="$2"; shift 2 ;;
+        *) echo "install.sh: unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m)
+case "$arch" in
+    x86_64|amd64)  arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo "install.sh: unsupported architecture: $arch" >&2; exit 1 ;;
+esac
+case "$os" in
+    linux|darwin) : ;;
+    *) echo "install.sh: unsupported OS: $os" >&2; exit 1 ;;
+esac
+bin="crosstalk-$os-$arch"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+echo "==> downloading $bin from $BASE"
+curl -fsSLk "$BASE/bin/$bin" -o "$tmp/crosstalk"
+curl -fsSLk "$BASE/bin/SHA256SUMS" -o "$tmp/SHA256SUMS"
+
+want=$(awk -v b="$bin" '$2 == b { print $1 }' "$tmp/SHA256SUMS")
+[ -n "$want" ] || { echo "install.sh: $bin not in checksum manifest" >&2; exit 1; }
+if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "$tmp/crosstalk" | awk '{print $1}')
+else
+    got=$(shasum -a 256 "$tmp/crosstalk" | awk '{print $1}')
+fi
+[ "$want" = "$got" ] || { echo "install.sh: checksum mismatch for $bin" >&2; exit 1; }
+
+if [ "$(id -u)" = "0" ]; then
+    dest=/usr/local/bin
+else
+    dest="$HOME/.local/bin"
+fi
+mkdir -p "$dest"
+chmod 755 "$tmp/crosstalk"
+mv "$tmp/crosstalk" "$dest/crosstalk"
+echo "==> installed $dest/crosstalk ($("$dest/crosstalk" version))"
+case ":$PATH:" in
+    *":$dest:"*) : ;;
+    *) echo "note: $dest is not on your PATH" >&2 ;;
+esac
+
+# Guard against a stale copy shadowing the one just installed: running
+# `crosstalk` must resolve to this binary, or updates silently don't take.
+resolved=$(command -v crosstalk 2>/dev/null || true)
+if [ -n "$resolved" ] && [ "$resolved" != "$dest/crosstalk" ]; then
+    echo "WARNING: 'crosstalk' on your PATH resolves to $resolved" >&2
+    echo "         which SHADOWS the copy just installed at $dest/crosstalk." >&2
+    echo "         That stale copy reports: $("$resolved" version 2>/dev/null || echo '?')" >&2
+    echo "         Remove it or reorder PATH, or updates will never take effect." >&2
+fi
+
+# The token is never embedded in this script (it is served unauthenticated);
+# prompt on a terminal if it wasn't passed.
+if [ -z "$TOKEN" ] && [ -e /dev/tty ]; then
+    printf "server token: " > /dev/tty
+    read -r TOKEN < /dev/tty || true
+fi
+if [ -z "$TOKEN" ]; then
+    echo "no token given — finish setup with:" >&2
+    echo "  crosstalk register $HOST $PORT $ALIAS --token <TOKEN>" >&2
+    exit 1
+fi
+
+echo "==> registering alias \"$ALIAS\" -> $HOST:$PORT"
+"$dest/crosstalk" register "$HOST" "$PORT" "$ALIAS" --token "$TOKEN"
+
+# Confirm the connection end-to-end so a bad token or unreachable server is
+# caught right here, not on first use.
+"$dest/crosstalk" rooms "$ALIAS" > /dev/null
+echo "==> connected: crosstalk $("$dest/crosstalk" version), alias \"$ALIAS\", host $(hostname)"

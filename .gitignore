@@ -1,0 +1,9 @@
+# build artifacts
+/bin/
+
+# server runtime state — holds the token and TLS key, never commit
+/run/
+
+# cross-compiled client binaries embedded at release build time
+/internal/dist/assets/*
+!/internal/dist/assets/.gitkeep
