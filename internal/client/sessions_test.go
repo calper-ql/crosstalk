@@ -76,10 +76,21 @@ func TestResolvePIDOrder(t *testing.T) {
 	if s.Name != "a" {
 		t.Fatalf("--as resolved wrong session: %+v", s)
 	}
-	s, err = ResolvePID("pid-x", "hub", "r")
+	s, err = ResolvePID("k7f2m9qx", "hub", "r")
 	must(err)
-	if s.PID != "pid-x" || s.Name != "" {
-		t.Fatalf("unknown --as should synthesize: %+v", s)
+	if s.PID != "k7f2m9qx" || s.Name != "" {
+		t.Fatalf("unknown pid-shaped --as should synthesize: %+v", s)
+	}
+
+	// --as also takes the role name; an unknown name is an error, not a
+	// synthesized pid the server will reject.
+	s, err = ResolvePID("b", "hub", "r")
+	must(err)
+	if s.PID != "pid-b" {
+		t.Fatalf("--as by name resolved wrong session: %+v", s)
+	}
+	if _, err := ResolvePID("nobody", "hub", "r"); err == nil {
+		t.Fatal("expected error for an unknown --as name")
 	}
 
 	// No match and no hints: join-first error.
@@ -106,5 +117,52 @@ func TestAdvanceAndPrune(t *testing.T) {
 	}
 	if _, err := ResolvePID("", "hub", "r"); err == nil {
 		t.Fatal("expected join-first error after prune")
+	}
+}
+
+func TestSessionNeverUsedForAnotherRoom(t *testing.T) {
+	testHome(t)
+	if err := UpsertSession(Session{Alias: "hub", Room: "a", Name: "w", PID: "pida0000"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertSession(Session{Alias: "hub", Room: "b", Name: "w", PID: "pidb0000"}); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit pid from another room is an error...
+	if _, err := ResolvePID("pida0000", "hub", "b"); err == nil {
+		t.Fatal("expected error: --as pid belongs to another room")
+	}
+	// ...an ambient one is skipped in favour of this room's session.
+	t.Setenv("CROSSTALK_PID", "pida0000")
+	s, err := ResolvePID("", "hub", "b")
+	if err != nil || s.PID != "pidb0000" {
+		t.Fatalf("ambient pid from another room should be skipped: %+v err %v", s, err)
+	}
+}
+
+func TestRecoverSession(t *testing.T) {
+	testHome(t)
+	dead := Session{Alias: "hub", Room: "r", Name: "w", PID: "old00000", Task: "t"}
+	if err := UpsertSession(dead); err != nil {
+		t.Fatal(err)
+	}
+	joins := 0
+	join := func() (Session, error) {
+		joins++
+		return Session{Alias: "hub", Room: "r", Name: "w", PID: fmt.Sprintf("new%05d", joins), Task: "t"}, nil
+	}
+	s, err := RecoverSession(dead, join)
+	if err != nil || s.PID != "new00001" {
+		t.Fatalf("recover: %+v err %v", s, err)
+	}
+	// A second process recovering the same dead pid adopts the replacement.
+	s, err = RecoverSession(dead, join)
+	if err != nil || s.PID != "new00001" || joins != 1 {
+		t.Fatalf("second recovery should adopt, got %+v (joins %d, err %v)", s, joins, err)
+	}
+	// The old pid still resolves, to the new session.
+	s, err = ResolvePID("old00000", "hub", "r")
+	if err != nil || s.PID != "new00001" {
+		t.Fatalf("superseded pid should resolve to its replacement: %+v err %v", s, err)
 	}
 }

@@ -45,7 +45,7 @@ func TestJoinSendEventsCursor(t *testing.T) {
 	}
 
 	o := mustJoin(t, h, "ai#42", agentID("anubis", "oracle"))
-	if _, err := h.Send("ai#42", o.PID, "hello @zeus/worker-3", ""); err != nil {
+	if _, _, err := h.Send("ai#42", o.PID, "hello @zeus/worker-3", ""); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
@@ -78,7 +78,7 @@ func TestMentionVariants(t *testing.T) {
 	mustJoin(t, h, "r", agentID("anubis", "worker-3")) // same name, other host
 	mustJoin(t, h, "r", agentID("anubis", "oracle"))
 
-	ev, err := h.Send("r", a.PID, "ping @worker-3 and @room and @nobody-here", "")
+	ev, _, err := h.Send("r", a.PID, "ping @worker-3 and @room and @nobody-here", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +102,29 @@ func TestMentionVariants(t *testing.T) {
 	}
 }
 
+func TestUnresolvedMentionsReported(t *testing.T) {
+	h, _ := newTestHub(Config{})
+	a := mustJoin(t, h, "r", agentID("zeus", "worker-3"))
+	mustJoin(t, h, "r", agentID("anubis", "oracle"))
+
+	// A typo'd name, an unknown host/name pair (trailing period trimmed),
+	// a repeat, and an email address — only the first two are reported.
+	_, unresolved, err := h.Send("r", a.PID,
+		"@orcale and @zeus/ghost. — @orcale again, cc ops@example.com, @oracle", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unresolved) != 2 || unresolved[0] != "@orcale" || unresolved[1] != "@zeus/ghost" {
+		t.Fatalf("unexpected unresolved: %q", unresolved)
+	}
+
+	// Code messages never report: @decorators aren't addressing anyone.
+	_, unresolved, err = h.Send("r", a.PID, "@property\ndef x(self): ...", proto.KindCode)
+	if err != nil || len(unresolved) != 0 {
+		t.Fatalf("code message reported unresolved %q (err %v)", unresolved, err)
+	}
+}
+
 func TestMentionTrailingPunctuation(t *testing.T) {
 	h, _ := newTestHub(Config{})
 	a := mustJoin(t, h, "r", agentID("zeus", "can"))
@@ -110,7 +133,7 @@ func TestMentionTrailingPunctuation(t *testing.T) {
 	// "@zeus/claude-observer." — the regex captures the trailing period
 	// into the name; resolution must trim it back. Same for bare names
 	// and @room.
-	ev, err := h.Send("r", a.PID, "@zeus/claude-observer. also @claude-observer- and @room.", "")
+	ev, _, err := h.Send("r", a.PID, "@zeus/claude-observer. also @claude-observer- and @room.", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +151,7 @@ func TestMentionTrailingPunctuation(t *testing.T) {
 	}
 	// A name that truly ends in a trimmable char still resolves exactly.
 	b := mustJoin(t, h, "r", agentID("zeus", "worker-"))
-	ev, err = h.Send("r", b.PID, "ping @worker-", "")
+	ev, _, err = h.Send("r", b.PID, "ping @worker-", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +166,7 @@ func TestIdentityBoundToPID(t *testing.T) {
 	if err := h.SetTask("r", a.PID, "new focus"); err != nil {
 		t.Fatal(err)
 	}
-	ev, err := h.Send("r", a.PID, "hi", "")
+	ev, _, err := h.Send("r", a.PID, "hi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,22 +181,22 @@ func TestRateLimitAndBodyCap(t *testing.T) {
 
 	// Burst of 5 goes through; the 6th is refused with a retry hint.
 	for i := 0; i < 5; i++ {
-		if _, err := h.Send("r", a.PID, "m", ""); err != nil {
+		if _, _, err := h.Send("r", a.PID, "m", ""); err != nil {
 			t.Fatalf("burst send %d refused: %v", i, err)
 		}
 	}
-	_, err := h.Send("r", a.PID, "m", "")
+	_, _, err := h.Send("r", a.PID, "m", "")
 	var ae *apiError
 	if !errors.As(err, &ae) || ae.Status != 429 || ae.RetryAfter <= 0 {
 		t.Fatalf("expected 429 with retry-after, got %v", err)
 	}
 	// After 2s at 30/min one token has refilled.
 	clock.advance(2 * time.Second)
-	if _, err := h.Send("r", a.PID, "m", ""); err != nil {
+	if _, _, err := h.Send("r", a.PID, "m", ""); err != nil {
 		t.Fatalf("send after refill: %v", err)
 	}
 
-	_, err = h.Send("r", a.PID, string(make([]byte, 17*1024)), "")
+	_, _, err = h.Send("r", a.PID, string(make([]byte, 17*1024)), "")
 	if !errors.As(err, &ae) || ae.Status != 413 {
 		t.Fatalf("expected 413 for oversize body, got %v", err)
 	}
@@ -182,13 +205,13 @@ func TestRateLimitAndBodyCap(t *testing.T) {
 func TestEvictionAndCursorGone(t *testing.T) {
 	h, clock := newTestHub(Config{RoomCap: 10, RatePerMin: 100000, Burst: 100000})
 	a := mustJoin(t, h, "r", agentID("zeus", "w"))
-	first, err := h.Send("r", a.PID, "first", "")
+	first, _, err := h.Send("r", a.PID, "first", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 20; i++ {
 		clock.advance(time.Millisecond)
-		if _, err := h.Send("r", a.PID, "spam", ""); err != nil {
+		if _, _, err := h.Send("r", a.PID, "spam", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,7 +228,7 @@ func TestPIDLifecycle(t *testing.T) {
 	if err := h.Leave("r", a.PID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := h.Send("r", a.PID, "hi", "")
+	_, _, err := h.Send("r", a.PID, "hi", "")
 	var ae *apiError
 	if !errors.As(err, &ae) || ae.Code != proto.ErrPIDGone {
 		t.Fatalf("expected pid_gone after leave, got %v", err)
@@ -233,13 +256,13 @@ func TestIdleExpiryAndRoomClosed(t *testing.T) {
 	}
 
 	// A write to the dead pid is pid_gone; rejoining creates the room fresh.
-	_, err = h.Send("r", a.PID, "hi", "")
+	_, _, err = h.Send("r", a.PID, "hi", "")
 	var ae *apiError
 	if !errors.As(err, &ae) || ae.Code != proto.ErrPIDGone {
 		t.Fatalf("expected pid_gone, got %v", err)
 	}
 	b := mustJoin(t, h, "r", agentID("zeus", "w"))
-	if _, err := h.Send("r", b.PID, "fresh room", ""); err != nil {
+	if _, _, err := h.Send("r", b.PID, "fresh room", ""); err != nil {
 		t.Fatalf("send after recreate: %v", err)
 	}
 }
@@ -249,7 +272,7 @@ func TestActivityKeepsRoomAlive(t *testing.T) {
 	a := mustJoin(t, h, "r", agentID("zeus", "w"))
 	for i := 0; i < 3; i++ {
 		clock.advance(5 * time.Hour)
-		if _, err := h.Send("r", a.PID, "still here", ""); err != nil {
+		if _, _, err := h.Send("r", a.PID, "still here", ""); err != nil {
 			t.Fatalf("send at hour %d: %v", (i+1)*5, err)
 		}
 		if expired := h.Sweep(); len(expired) != 0 {
@@ -272,7 +295,7 @@ func TestParkAndWake(t *testing.T) {
 		<-ch
 		close(done)
 	}()
-	if _, err := h.Send("r", b.PID, "wake up", ""); err != nil {
+	if _, _, err := h.Send("r", b.PID, "wake up", ""); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -302,7 +325,7 @@ func TestHistory(t *testing.T) {
 	var ids []string
 	for i := 0; i < 10; i++ {
 		clock.advance(time.Millisecond)
-		ev, err := h.Send("r", a.PID, "m", "")
+		ev, _, err := h.Send("r", a.PID, "m", "")
 		if err != nil {
 			t.Fatal(err)
 		}

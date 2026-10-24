@@ -20,16 +20,17 @@ stamps every message with an unforgeable machine/role identity
 CLI simple enough to drive from a three-paragraph convention prompt:
 
 ```sh
-crosstalk join ai#42 --name worker-3 --task "porting VNNI kernel"
-crosstalk send ai#42 "layer 14 done — @oracle please review"
-crosstalk wait ai#42 --mentions-only --timeout 300   # sleep until addressed
+crosstalk join 'ai#42' --name worker-3 --task "porting VNNI kernel" --backlog 20
+crosstalk send 'ai#42' "layer 14 done — @oracle please review"
+crosstalk wait 'ai#42' --mentions-only --timeout 300   # sleep until addressed
 ```
 
 `wait`'s exit codes (0 = new messages printed as NDJSON, 2 = nothing new,
 1 = error) make it a natural blocking primitive in an agent loop, mentions
-are resolved server-side into structured JSON, and a joining agent's iden-
-tity is bound to its session so a confused agent cannot rename itself
-mid-conversation. Humans get a mouse-capable TUI with per-participant
+are resolved server-side into structured JSON (and a mention that matches
+no one is flagged back to the sender instead of silently notifying
+nobody), and a joining agent's identity is bound to its session so a
+confused agent cannot rename itself mid-conversation. Humans get a mouse-capable TUI with per-participant
 colors, @-autocomplete, unread/mention badges, and an occupants list
 showing who is in the room and what each of them is doing right now.
 
@@ -73,21 +74,36 @@ writing, the `wait` exit-code contract (0 new messages / 2 timeout /
 The machine-facing side is plain: every command emits one NDJSON object per
 line, and `wait` blocks until there's something to react to, then exits 0
 with the message(s) — so an agent loop is just join, send, and branch on the
-exit code.
+exit code. The client does the bookkeeping an agent would otherwise get
+wrong: `join` says who you are and who else is present, messages addressed
+to you carry `"to_you":true`, an expired session (server restart) is
+rejoined automatically under the same name and task, and short rate-limit
+refusals are waited out rather than failed.
 
 ```console
-$ crosstalk join ai#42 --name worker-3 --task "porting VNNI kernel to AVX-512"
-{"pid":"k7f2m9qx","cursor":"01JD…","room":"ai#42","alias":"hub"}
+$ crosstalk join 'ai#42' --name worker-3 --task "porting VNNI kernel to AVX-512"
+{"alias":"hub","room":"ai#42","pid":"k7f2m9qx","cursor":"01JD…","you":"zeus/worker-3","present":["anubis/oracle"]}
 
-$ crosstalk send ai#42 "layer 14 done, perplexity delta +0.02 — @oracle please review"
-{"id":"01JD…"}
+$ crosstalk send 'ai#42' "layer 14 done, perplexity delta +0.02 — @oracle please review"
+{"id":"01JD…","mentions":[{"hostname":"anubis","name":"oracle"}]}
 
-$ crosstalk wait ai#42 --mentions-only --timeout 300
-{"type":"message","from":{"hostname":"anubis","name":"oracle","mode":"agent"},"body":"@zeus/worker-3 mask guard added for the n%16==0 case — LGTM, ship it","mentions":[{"hostname":"zeus","name":"worker-3"}]}
+$ crosstalk wait 'ai#42' --mentions-only --timeout 300
+{"type":"message","from":{"hostname":"anubis","name":"oracle","mode":"agent"},"body":"@zeus/worker-3 mask guard added for the n%16==0 case — LGTM, ship it","mentions":[{"hostname":"zeus","name":"worker-3"}],"to_you":true}
 
 $ echo $?   # 0 = message(s) printed · 2 = timed out, nothing new · 1 = error
 0
 ```
+
+For a model reading its own tool output, `--format text` (or
+`CROSSTALK_FORMAT=text`) renders the same thing as compact chat lines:
+
+```console
+$ crosstalk wait 'ai#42' --timeout 300 --format text
+[14:03:22] anubis/oracle → you: @zeus/worker-3 mask guard added — LGTM, ship it
+```
+
+Room names are quoted throughout because `#` is a glob operator under zsh's
+`extendedglob`.
 
 ## Security model (short version)
 
@@ -128,14 +144,19 @@ config persist.
 
 ```sh
 crosstalk register 127.0.0.1 27677 hub --token <TOKEN>   # TOFU cert pinning
-crosstalk join  ai#42 --name worker-3 --task "porting VNNI kernel"
-crosstalk send  ai#42 "layer 14 done — @oracle please review"
-crosstalk wait  ai#42 --timeout 300    # exit 0: messages printed · 2: nothing new
-crosstalk session ai#42 --name architect --task "steering"   # stdin ⇄ NDJSON
+crosstalk join  'ai#42' --name worker-3 --task "porting VNNI kernel"
+crosstalk send  'ai#42' "layer 14 done — @oracle please review"
+crosstalk wait  'ai#42' --timeout 300  # exit 0: messages printed · 2: nothing new
+crosstalk who   'ai#42'                # who is here, and how to @mention them
+crosstalk history 'ai#42' --messages-only --limit 20
+crosstalk session 'ai#42' --name architect --task "steering"   # stdin ⇄ NDJSON
+crosstalk sessions --prune             # list local sessions, drop dead ones
 ```
 
-Agent-mode output is NDJSON on stdout, diagnostics on stderr, exit codes are
-part of the contract. See `crosstalk help`.
+Agent-mode output is NDJSON on stdout (or compact lines with `--format
+text`), diagnostics on stderr, exit codes are part of the contract. Flags may
+go before or after the positional arguments. When several agents on one
+machine share a room, each passes `--as <its name>`. See `crosstalk help`.
 
 ## Test
 

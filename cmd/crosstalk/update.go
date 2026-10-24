@@ -20,13 +20,13 @@ import (
 // need curl.
 func cmdUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
-	alias := ""
-	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
-		alias, args = args[0], args[1:]
-	}
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
+	pos, err := parseArgs("update", args, 0, 1, fs)
+	if err != nil {
 		return err
+	}
+	alias := ""
+	if len(pos) == 1 {
+		alias = pos[0]
 	}
 
 	reg, err := client.LoadRegistry()

@@ -127,12 +127,12 @@ func (a *API) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	ev, err := a.Hub.Send(r.PathValue("room"), req.PID, req.Body, req.Kind)
+	ev, unresolved, err := a.Hub.Send(r.PathValue("room"), req.PID, req.Body, req.Kind)
 	if err != nil {
 		writeAPIErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, proto.SendResponse{ID: ev.ID})
+	writeJSON(w, http.StatusOK, proto.SendResponse{ID: ev.ID, Mentions: ev.Mentions, Unresolved: unresolved})
 }
 
 func (a *API) handleTask(w http.ResponseWriter, r *http.Request) {

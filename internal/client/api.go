@@ -28,7 +28,11 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("server returned %d %s: %s", e.Status, e.Code, e.Message)
+	msg := fmt.Sprintf("server returned %d %s: %s", e.Status, e.Code, e.Message)
+	if e.RetryAfter > 0 {
+		msg += fmt.Sprintf(" (retry in %s)", e.RetryAfter)
+	}
+	return msg
 }
 
 // Conn is a client for one registered server, verifying the pinned

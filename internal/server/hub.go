@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/calper-ql/crosstalk/internal/proto"
 )
@@ -60,6 +62,10 @@ type apiError struct {
 }
 
 func (e *apiError) Error() string { return e.Code + ": " + e.Message }
+
+func errNoRoom() *apiError {
+	return &apiError{404, proto.ErrNotFound, "no such room: rooms are created by the first join and deleted once idle", 0}
+}
 
 func errPIDGone() *apiError {
 	return &apiError{410, proto.ErrPIDGone, "pid not known to this server (room expired, left, or server restarted): rejoin and redeclare your task", 0}
@@ -184,19 +190,22 @@ func (h *Hub) Join(roomName string, id proto.Identity, remote string) (proto.Joi
 
 // Send posts a message. The From identity is resolved from the pid — the
 // sender has no say in it — and mentions are parsed and resolved server-side.
-func (h *Hub) Send(roomName, pid, body, kind string) (proto.Event, error) {
+// It also returns the @-tokens that resolved to nobody, so the sender learns
+// that a mention notified no one instead of both sides waiting on it. Code
+// messages report none: @decorators and the like are not addressing anyone.
+func (h *Hub) Send(roomName, pid, body, kind string) (proto.Event, []string, error) {
 	if kind == "" {
 		kind = proto.KindText
 	}
 	if kind != proto.KindText && kind != proto.KindStatus && kind != proto.KindCode {
-		return proto.Event{}, &apiError{400, proto.ErrBadRequest, "kind must be text, status, or code", 0}
+		return proto.Event{}, nil, &apiError{400, proto.ErrBadRequest, "kind must be text, status, or code", 0}
 	}
 	if len(body) > h.cfg.MaxBody {
-		return proto.Event{}, &apiError{413, proto.ErrTooLarge,
+		return proto.Event{}, nil, &apiError{413, proto.ErrTooLarge,
 			fmt.Sprintf("message body is %d bytes; the cap is %d — put large content in a file or the issue and reference it by path", len(body), h.cfg.MaxBody), 0}
 	}
 	if strings.TrimSpace(body) == "" {
-		return proto.Event{}, &apiError{400, proto.ErrBadRequest, "empty message body", 0}
+		return proto.Event{}, nil, &apiError{400, proto.ErrBadRequest, "empty message body", 0}
 	}
 
 	h.mu.Lock()
@@ -204,23 +213,27 @@ func (h *Hub) Send(roomName, pid, body, kind string) (proto.Event, error) {
 
 	r, p := h.livePID(roomName, pid)
 	if p == nil {
-		return proto.Event{}, errPIDGone()
+		return proto.Event{}, nil, errPIDGone()
 	}
 	if wait, ok := p.bucket.take(h.now(), h.cfg.RatePerMin/60.0, h.cfg.Burst); !ok {
-		return proto.Event{}, &apiError{429, proto.ErrRateLimited,
+		return proto.Event{}, nil, &apiError{429, proto.ErrRateLimited,
 			"rate limited: keep the conversation followable by a human", wait}
 	}
 	p.lastSeen = h.now()
 
+	mentions, unresolved := resolveMentions(body, r)
+	if kind == proto.KindCode {
+		unresolved = nil
+	}
 	id := p.identity // snapshot, includes current task
 	ev := h.append(r, proto.Event{
 		Type:     proto.TypeMessage,
 		From:     &id,
 		Body:     body,
 		Kind:     kind,
-		Mentions: resolveMentions(body, r),
+		Mentions: mentions,
 	})
-	return ev, nil
+	return ev, unresolved, nil
 }
 
 // SetTask updates the participant's current-activity line and broadcasts it
@@ -349,7 +362,7 @@ func (h *Hub) History(roomName, before string, limit int) ([]proto.Event, error)
 
 	r := h.rooms[roomName]
 	if r == nil || r.closed {
-		return nil, &apiError{404, proto.ErrNotFound, "no such room", 0}
+		return nil, errNoRoom()
 	}
 	end := len(r.events)
 	if before != "" {
@@ -399,7 +412,7 @@ func (h *Hub) Participants(roomName string) ([]proto.ParticipantInfo, error) {
 
 	r := h.rooms[roomName]
 	if r == nil || r.closed {
-		return nil, &apiError{404, proto.ErrNotFound, "no such room", 0}
+		return nil, errNoRoom()
 	}
 	out := make([]proto.ParticipantInfo, 0, len(r.participants))
 	for _, p := range r.participants {
@@ -486,10 +499,22 @@ var mentionRe = regexp.MustCompile(`@([\p{L}\p{N}._-]+)(?:/([\p{L}\p{N}._-]+))?`
 
 // resolveMentions parses @-references and resolves them against the room's
 // participant history (including departed participants). Text that resolves
-// to nobody stays plain text. Caller holds h.mu.
-func resolveMentions(body string, r *room) []proto.Mention {
-	var out []proto.Mention
+// to nobody stays plain text, and is reported in unresolved — except where
+// the @ follows a letter or digit (user@example.com), which is not an
+// attempt to address anyone. Caller holds h.mu.
+func resolveMentions(body string, r *room) (mentions []proto.Mention, unresolved []string) {
 	seen := make(map[string]bool)
+	missed := make(map[string]bool)
+	miss := func(at int, token string) {
+		if prev, _ := utf8.DecodeLastRuneInString(body[:at]); unicode.IsLetter(prev) || unicode.IsDigit(prev) {
+			return
+		}
+		token = strings.TrimRight(token, "._-")
+		if !missed[token] {
+			missed[token] = true
+			unresolved = append(unresolved, token)
+		}
+	}
 	add := func(m proto.Mention) {
 		key := m.Hostname + "\x00" + m.Name
 		if m.All {
@@ -497,7 +522,7 @@ func resolveMentions(body string, r *room) []proto.Mention {
 		}
 		if !seen[key] {
 			seen[key] = true
-			out = append(out, m)
+			mentions = append(mentions, m)
 		}
 	}
 	// The token class includes . _ - so "@worker-3." (mention followed by
@@ -519,8 +544,11 @@ func resolveMentions(body string, r *room) []proto.Mention {
 		return "", false
 	}
 
-	for _, m := range mentionRe.FindAllStringSubmatch(body, -1) {
-		first, second := m[1], m[2]
+	for _, loc := range mentionRe.FindAllStringSubmatchIndex(body, -1) {
+		token, first, second := body[loc[0]:loc[1]], body[loc[2]:loc[3]], ""
+		if loc[4] >= 0 {
+			second = body[loc[4]:loc[5]]
+		}
 		if second == "" {
 			if _, ok := resolveTrimming(first, func(s string) bool { return s == "room" }); ok {
 				add(proto.Mention{All: true})
@@ -537,6 +565,7 @@ func resolveMentions(body string, r *room) []proto.Mention {
 				return false
 			})
 			if !ok {
+				miss(loc[0], token)
 				continue
 			}
 			for _, p := range r.participants {
@@ -557,9 +586,11 @@ func resolveMentions(body string, r *room) []proto.Mention {
 		})
 		if ok {
 			add(proto.Mention{Hostname: first, Name: name})
+		} else {
+			miss(loc[0], token)
 		}
 	}
-	return out
+	return mentions, unresolved
 }
 
 // tokenBucket is the per-pid flow-control bucket: capacity Burst, refill

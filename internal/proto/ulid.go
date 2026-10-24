@@ -2,6 +2,7 @@ package proto
 
 import (
 	"crypto/rand"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,10 +86,25 @@ func NewPID() string {
 	if _, err := rand.Read(b[:]); err != nil {
 		panic("proto: crypto/rand failed: " + err.Error())
 	}
-	const lower = "0123456789abcdefghjkmnpqrstvwxyz"
 	out := make([]byte, 8)
 	for i, c := range b {
-		out[i] = lower[int(c)&31]
+		out[i] = pidAlphabet[int(c)&31]
 	}
 	return string(out)
+}
+
+const pidAlphabet = "0123456789abcdefghjkmnpqrstvwxyz"
+
+// LooksLikePID reports whether s has the shape NewPID mints, which lets the
+// client tell a pid from a role name in --as.
+func LooksLikePID(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !strings.ContainsRune(pidAlphabet, rune(s[i])) {
+			return false
+		}
+	}
+	return true
 }

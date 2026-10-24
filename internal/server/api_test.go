@@ -131,7 +131,7 @@ func TestLongPollDelivery(t *testing.T) {
 	}()
 
 	time.Sleep(300 * time.Millisecond) // let the poll park
-	if _, err := hub.Send("r", b.PID, "wake", ""); err != nil {
+	if _, _, err := hub.Send("r", b.PID, "wake", ""); err != nil {
 		t.Fatal(err)
 	}
 

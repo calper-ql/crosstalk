@@ -116,8 +116,12 @@ type SendRequest struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// SendResponse echoes who the message reached: the resolved mentions, and
+// any @-tokens that matched nobody (so nobody was notified for them).
 type SendResponse struct {
-	ID string `json:"id"`
+	ID         string    `json:"id"`
+	Mentions   []Mention `json:"mentions,omitempty"`
+	Unresolved []string  `json:"unresolved,omitempty"`
 }
 
 type TaskRequest struct {
