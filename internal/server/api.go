@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -22,8 +23,70 @@ type API struct {
 	Hub   *Hub
 	Token string
 
+	// The operator: optional, and off when OperatorToken is empty.
+	//
+	// The fleet token is one secret shared by every machine, and with it a
+	// client declares its own hostname. That is fine for what it protects
+	// against (a confused agent), and not enough for one identity that has to
+	// mean something: a person signed in to a front end that speaks for them —
+	// lv_hub hosts crosstalk and joins rooms as hub/<account>. So that nothing
+	// holding only the fleet token can speak under that hostname, a join that
+	// declares OperatorHostname must present OperatorToken, and the pid it
+	// gets works only with that token.
+	//
+	// The operator token is accepted wherever the fleet token is. It is not an
+	// admin credential: it can do nothing more than join under its hostname.
+	OperatorToken    string
+	OperatorHostname string
+
 	failMu   sync.Mutex
 	failures map[string]*tokenBucket // per-source-IP auth-failure limiter
+}
+
+type ctxKey int
+
+const operatorKey ctxKey = 1
+
+// isOperator reports a request that authenticated with the operator token.
+func isOperator(r *http.Request) bool {
+	v, _ := r.Context().Value(operatorKey).(bool)
+	return v
+}
+
+// reserved reports a hostname only the operator may declare. Case is
+// ignored: "Hub" beside "hub" in a room would fool exactly the reader this
+// exists for.
+//
+// So would "һub" with a Cyrillic һ, or fullwidth "ｈｕｂ" — and there is no
+// end of letters that look like other letters. A machine's hostname is
+// ASCII, so on a server with an operator a hostname that is not is taken
+// for an imitation of the operator's and kept for the operator too, rather
+// than this trying to list them. (Without an operator nothing is reserved
+// and any hostname is as good as another, as before.)
+func (a *API) reserved(hostname string) bool {
+	if a.OperatorToken == "" || a.OperatorHostname == "" {
+		return false
+	}
+	if strings.EqualFold(hostname, a.OperatorHostname) {
+		return true
+	}
+	for i := 0; i < len(hostname); i++ {
+		if hostname[i] >= 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+// guardPID refuses a pid that belongs to the operator to anyone else. It
+// writes the response itself and returns false when it refuses.
+func (a *API) guardPID(w http.ResponseWriter, r *http.Request, room, pid string) bool {
+	if a.OperatorToken == "" || isOperator(r) || !a.Hub.OperatorPID(room, pid) {
+		return true
+	}
+	log.Printf("auth: operator pid presented without the operator token from %s (%s %s)", sourceIP(r), r.Method, r.URL.Path)
+	writeErr(w, http.StatusForbidden, proto.ErrForbidden, "this pid belongs to the operator")
+	return false
 }
 
 func NewAPI(hub *Hub, token string) *API {
@@ -76,7 +139,13 @@ func (a *API) authenticate(next http.Handler) http.Handler {
 
 		ip := sourceIP(r)
 		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) != 1 {
+		// Both compared, always: which one matched must not show in the timing.
+		fleet := subtle.ConstantTimeCompare([]byte(token), []byte(a.Token)) == 1
+		operator := a.OperatorToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(a.OperatorToken)) == 1
+		if operator {
+			r = r.WithContext(context.WithValue(r.Context(), operatorKey, true))
+		}
+		if !fleet && !operator {
 			if !a.allowAuthFailure(ip) {
 				writeErr(w, http.StatusTooManyRequests, proto.ErrRateLimited, "too many failed auth attempts")
 				return
@@ -110,9 +179,22 @@ func (a *API) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
-	resp, err := a.Hub.Join(r.PathValue("room"), proto.Identity{
-		Hostname: req.Hostname, Name: req.Name, Mode: req.Mode, Task: req.Task,
-	}, sourceIP(r))
+	id := proto.Identity{Hostname: req.Hostname, Name: req.Name, Mode: req.Mode, Task: req.Task}
+	var (
+		resp proto.JoinResponse
+		err  error
+	)
+	switch {
+	case a.reserved(req.Hostname) && !isOperator(r):
+		log.Printf("auth: join as reserved hostname %q refused from %s", req.Hostname, sourceIP(r))
+		writeErr(w, http.StatusForbidden, proto.ErrForbidden,
+			fmt.Sprintf("the hostname %q is reserved for the operator of this server (as is any hostname that is not plain ASCII)", req.Hostname))
+		return
+	case a.reserved(req.Hostname):
+		resp, err = a.Hub.JoinAsOperator(r.PathValue("room"), id, sourceIP(r))
+	default:
+		resp, err = a.Hub.Join(r.PathValue("room"), id, sourceIP(r))
+	}
 	if err != nil {
 		writeAPIErr(w, err)
 		return
@@ -125,6 +207,9 @@ func (a *API) handleJoin(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleSend(w http.ResponseWriter, r *http.Request) {
 	var req proto.SendRequest
 	if !readJSON(w, r, &req) {
+		return
+	}
+	if !a.guardPID(w, r, r.PathValue("room"), req.PID) {
 		return
 	}
 	ev, unresolved, err := a.Hub.Send(r.PathValue("room"), req.PID, req.Body, req.Kind)
@@ -140,6 +225,9 @@ func (a *API) handleTask(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &req) {
 		return
 	}
+	if !a.guardPID(w, r, r.PathValue("room"), req.PID) {
+		return
+	}
 	if err := a.Hub.SetTask(r.PathValue("room"), req.PID, req.Task); err != nil {
 		writeAPIErr(w, err)
 		return
@@ -150,6 +238,9 @@ func (a *API) handleTask(w http.ResponseWriter, r *http.Request) {
 func (a *API) handleLeave(w http.ResponseWriter, r *http.Request) {
 	var req proto.LeaveRequest
 	if !readJSON(w, r, &req) {
+		return
+	}
+	if !a.guardPID(w, r, r.PathValue("room"), req.PID) {
 		return
 	}
 	if err := a.Hub.Leave(r.PathValue("room"), req.PID); err != nil {
@@ -183,6 +274,9 @@ func (a *API) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	deadline := time.Now().Add(wait)
 
+	if !a.guardPID(w, r, room, pid) {
+		return
+	}
 	evs, err := a.Hub.EventsAfter(room, pid, after)
 	if err != nil {
 		writeAPIErr(w, err)

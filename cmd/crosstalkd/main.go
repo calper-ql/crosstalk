@@ -29,6 +29,12 @@ type fileConfig struct {
 	// StateDir holds the TLS cert/key; defaults to the config file's dir.
 	StateDir string `toml:"state_dir"`
 
+	// The operator (optional, both or neither): a second token, held by one
+	// front end that speaks for signed-in people, and the hostname only that
+	// token may join under. See server.API.
+	OperatorToken    string `toml:"operator_token"`
+	OperatorHostname string `toml:"operator_hostname"`
+
 	// Phase 5 tunables; zero means the documented default.
 	RoomCap        int     `toml:"room_cap"`
 	IdleExpiryMins int     `toml:"idle_expiry_minutes"`
@@ -51,6 +57,14 @@ func main() {
 	}
 	if cfg.Token == "" {
 		fatalf("config: token is mandatory — generate one with e.g. `openssl rand -hex 24`")
+	}
+	switch {
+	case (cfg.OperatorToken == "") != (cfg.OperatorHostname == ""):
+		fatalf("config: operator_token and operator_hostname go together — set both or neither")
+	case cfg.OperatorToken != "" && cfg.OperatorToken == cfg.Token:
+		fatalf("config: operator_token must differ from token — the fleet shares that one, which is the point of having a second")
+	case cfg.OperatorHostname != "" && !server.ValidName(cfg.OperatorHostname):
+		fatalf("config: operator_hostname must be 1-64 chars of letters, digits, . _ -")
 	}
 	if cfg.StateDir == "" {
 		abs, err := filepath.Abs(*configPath)
@@ -81,6 +95,7 @@ func main() {
 		server.BindPort = port
 	}
 	api := server.NewAPI(hub, cfg.Token)
+	api.OperatorToken, api.OperatorHostname = cfg.OperatorToken, cfg.OperatorHostname
 	srv := &http.Server{
 		Addr:    cfg.Bind,
 		Handler: api.Handler(),
@@ -96,13 +111,23 @@ func main() {
 
 	log.Printf("crosstalkd %s listening on %s", proto.FullVersion(), cfg.Bind)
 	log.Printf("certificate fingerprint: %s", server.FormatFingerprint(server.Fingerprint(cert)))
+	if cfg.OperatorHostname != "" {
+		log.Printf("operator: the hostname %q is reserved for the operator token", cfg.OperatorHostname)
+	}
 
-	host, port := advertiseAddr(cfg.Bind)
-	fmt.Fprintf(os.Stderr, "\ninstall a client on any machine with:\n\n"+
-		"  curl -fsSLk https://%s:%s/install.sh | sh -s -- --token %s --alias hub\n\n"+
-		"or register an existing client:\n\n"+
-		"  crosstalk register %s %s hub --token %s\n\n",
-		host, port, cfg.Token, host, port, cfg.Token)
+	// The copyable lines carry the token, so they go to a person at a
+	// terminal and nowhere else: under a service manager or in a container,
+	// stderr is a log, and a log is no place for the fleet's one secret.
+	if stderrIsTerminal() {
+		host, port := advertiseAddr(cfg.Bind)
+		fmt.Fprintf(os.Stderr, "\ninstall a client on any machine with:\n\n"+
+			"  curl -fsSLk https://%s:%s/install.sh | sh -s -- --token %s --alias hub\n\n"+
+			"or register an existing client:\n\n"+
+			"  crosstalk register %s %s hub --token %s\n\n",
+			host, port, cfg.Token, host, port, cfg.Token)
+	} else {
+		log.Printf("not a terminal: the install line (it carries the token) is not printed; the token is in %s", *configPath)
+	}
 
 	if err := srv.ListenAndServeTLS("", ""); err != nil {
 		fatalf("serve: %v", err)
@@ -132,6 +157,13 @@ func advertiseAddr(bind string) (host, port string) {
 		return h, port
 	}
 	return "127.0.0.1", port
+}
+
+// stderrIsTerminal reports whether stderr is a character device — a
+// terminal, as opposed to the pipe or file a supervisor reads logs from.
+func stderrIsTerminal() bool {
+	st, err := os.Stderr.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
 }
 
 func fatalf(format string, v ...any) {

@@ -26,7 +26,9 @@ import (
 const usage = `crosstalk — lightweight communication for agents and humans
 
 setup:
-  crosstalk register <addr> <port> <alias> --token <TOKEN>
+  crosstalk register <addr> <port> <alias> --token <TOKEN> [--fingerprint <sha256>]
+                     (the token may be given as CROSSTALK_TOKEN instead; with
+                     --fingerprint the server's certificate must be that one)
   crosstalk default <alias>
 
 rooms take the form alias/room or a bare room on the default server; quote

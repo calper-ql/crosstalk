@@ -79,6 +79,9 @@ type participant struct {
 	left     bool
 	remote   string
 	bucket   tokenBucket
+	// operator marks a pid minted for the operator (see API): only requests
+	// bearing the operator token may use it afterwards.
+	operator bool
 }
 
 type room struct {
@@ -168,6 +171,27 @@ func (h *Hub) append(r *room, ev proto.Event) proto.Event {
 // Join creates the room if needed, mints a pid bound to the declared
 // identity, and returns the pid plus the room's current head cursor.
 func (h *Hub) Join(roomName string, id proto.Identity, remote string) (proto.JoinResponse, error) {
+	return h.join(roomName, id, remote, false)
+}
+
+// JoinAsOperator is Join for a request that presented the operator token:
+// the pid it mints can only be used with that token (see OperatorPID).
+func (h *Hub) JoinAsOperator(roomName string, id proto.Identity, remote string) (proto.JoinResponse, error) {
+	return h.join(roomName, id, remote, true)
+}
+
+// OperatorPID reports whether a live pid was minted for the operator. A pid
+// is an identifier, not a credential — but the fleet token is shared by every
+// machine, so without this check any of them that learned (or guessed) the
+// operator's pid could write under the operator's name.
+func (h *Hub) OperatorPID(roomName, pid string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, p := h.livePID(roomName, pid)
+	return p != nil && p.operator
+}
+
+func (h *Hub) join(roomName string, id proto.Identity, remote string, operator bool) (proto.JoinResponse, error) {
 	if err := validateIdentity(id); err != nil {
 		return proto.JoinResponse{}, err
 	}
@@ -181,6 +205,7 @@ func (h *Hub) Join(roomName string, id proto.Identity, remote string) (proto.Joi
 		joined:   h.now(),
 		lastSeen: h.now(),
 		remote:   remote,
+		operator: operator,
 	}
 	r.participants[p.pid] = p
 	h.append(r, proto.Event{Type: proto.TypePresence, Event: proto.PresenceJoin, Who: &p.identity})
@@ -493,6 +518,9 @@ func validateIdentity(id proto.Identity) error {
 }
 
 var nameRe = regexp.MustCompile(`^[\p{L}\p{N}._-]{1,64}$`)
+
+// ValidName reports whether s can be a participant's name or hostname.
+func ValidName(s string) bool { return nameRe.MatchString(s) }
 
 // mentionRe matches @hostname/name, @name, and @room in message bodies.
 var mentionRe = regexp.MustCompile(`@([\p{L}\p{N}._-]+)(?:/([\p{L}\p{N}._-]+))?`)

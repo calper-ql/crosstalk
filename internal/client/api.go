@@ -82,6 +82,23 @@ func pinnedTLSConfig(fingerprint string) *tls.Config {
 	}
 }
 
+// NormalizeFingerprint turns a certificate fingerprint as a person or a tool
+// writes it — "sha256:AB:CD:…", "ab cd …", plain hex — into the form the
+// registry stores: 64 lowercase hex characters. It returns "" for anything
+// that is not a SHA-256.
+func NormalizeFingerprint(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "sha256:")
+	s = strings.NewReplacer(":", "", " ", "", "-", "").Replace(s)
+	if len(s) != 64 {
+		return ""
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return ""
+	}
+	return s
+}
+
 // FetchFingerprint connects without a pin and returns the SHA-256 of the
 // certificate the server presents: the trust-on-first-use moment.
 func FetchFingerprint(addr string, port int) (string, error) {

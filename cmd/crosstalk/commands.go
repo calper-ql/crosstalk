@@ -19,7 +19,8 @@ const asUsage = "which of your sessions to act as — role name or pid (when sev
 
 func cmdRegister(args []string) error {
 	fs := flag.NewFlagSet("register", flag.ContinueOnError)
-	token := fs.String("token", "", "the server's global token (required)")
+	token := fs.String("token", "", "the server's global token (or set CROSSTALK_TOKEN)")
+	fingerprint := fs.String("fingerprint", "", "the server's certificate fingerprint (sha256), to pin it instead of trusting the first one seen")
 	pos, err := parseArgs("register", args, 3, 3, fs)
 	if err != nil {
 		return err
@@ -32,16 +33,33 @@ func cmdRegister(args []string) error {
 	if !client.ValidAlias(alias) {
 		return fmt.Errorf("register: alias must be lowercase letters, digits, hyphens (got %q)", alias)
 	}
+	// The environment is the way to pass the token without putting it on a
+	// command line, where every user of the machine can read it in `ps`.
 	if *token == "" {
-		return errors.New("register: --token is required")
+		*token = os.Getenv("CROSSTALK_TOKEN")
+	}
+	if *token == "" {
+		return errors.New("register: --token is required (or set CROSSTALK_TOKEN)")
+	}
+	want := ""
+	if *fingerprint != "" {
+		if want = client.NormalizeFingerprint(*fingerprint); want == "" {
+			return fmt.Errorf("register: --fingerprint must be the sha256 of the server's certificate: 64 hex characters (colons and a sha256: prefix are fine)")
+		}
 	}
 
-	// Trust-on-first-use: pin whatever certificate the server presents now,
-	// then verify the token actually works before writing anything — a bad
-	// registration is discovered at register time, never mid-run.
+	// Trust-on-first-use, unless a fingerprint was given: pin whatever
+	// certificate the server presents now, then verify the token actually
+	// works before writing anything — a bad registration is discovered at
+	// register time, never mid-run. With --fingerprint there is no first use
+	// to trust: the certificate presented must be the one named, and the
+	// token is never sent to a server that shows another.
 	fp, err := client.FetchFingerprint(addr, port)
 	if err != nil {
 		return fmt.Errorf("register: cannot reach %s:%d: %w", addr, port, err)
+	}
+	if want != "" && fp != want {
+		return fmt.Errorf("register: %s:%d presents a different certificate than the one given\n  expected %s\n  presented %s\nnothing was registered and the token was not sent", addr, port, want, fp)
 	}
 	entry := client.ServerEntry{Addr: addr, Port: port, Token: *token, Fingerprint: fp}
 	conn := client.NewConn(entry)
@@ -64,7 +82,11 @@ func cmdRegister(args []string) error {
 	if err := reg.Save(); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "registered %q -> %s:%d (server %s, cert pinned)\n", alias, addr, port, ver.Version)
+	how := "cert pinned on first use"
+	if want != "" {
+		how = "cert matches the given fingerprint"
+	}
+	fmt.Fprintf(os.Stderr, "registered %q -> %s:%d (server %s, %s)\n", alias, addr, port, ver.Version, how)
 	if reg.Default == alias {
 		fmt.Fprintf(os.Stderr, "%q is the default server\n", alias)
 	}

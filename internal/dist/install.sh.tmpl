@@ -7,21 +7,50 @@
 #
 # The server's TLS certificate is self-signed (clients pin it at register
 # time), hence the -k on the bootstrap fetch.
+#
+# Whoever already knows the server's certificate can close that window:
+#
+#   --fingerprint <sha256>     the certificate's fingerprint; registration pins
+#                              exactly it instead of the first one seen
+#   --pin "sha256//<base64>"   the certificate's public key, in curl's form;
+#                              the downloads below are refused from anything
+#                              else (give it to the bootstrap curl as
+#                              --pinnedpubkey too)
+#
+# The token can be given as CROSSTALK_TOKEN in the environment instead of
+# --token, which keeps it off the command line (and out of `ps`).
 set -eu
 
 HOST="__SERVER_HOST__"
 PORT="__SERVER_PORT__"
 BASE="https://$HOST:$PORT"
-TOKEN=""
+TOKEN="${CROSSTALK_TOKEN:-}"
 ALIAS="default"
+FINGERPRINT=""
+PIN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --token) TOKEN="$2"; shift 2 ;;
         --alias) ALIAS="$2"; shift 2 ;;
+        --fingerprint) FINGERPRINT="$2"; shift 2 ;;
+        --pin) PIN="$2"; shift 2 ;;
         *) echo "install.sh: unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+# Nothing started below needs the token in its environment but the one
+# `crosstalk register`, which is handed it explicitly.
+unset CROSSTALK_TOKEN
+
+# fetch <url> <file>: -k because the certificate is self-signed; with a pin,
+# curl still refuses a server whose public key is not the pinned one.
+fetch() {
+    if [ -n "$PIN" ]; then
+        curl -fsSLk --pinnedpubkey "$PIN" "$1" -o "$2"
+    else
+        curl -fsSLk "$1" -o "$2"
+    fi
+}
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
@@ -40,8 +69,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 echo "==> downloading $bin from $BASE"
-curl -fsSLk "$BASE/bin/$bin" -o "$tmp/crosstalk"
-curl -fsSLk "$BASE/bin/SHA256SUMS" -o "$tmp/SHA256SUMS"
+fetch "$BASE/bin/$bin" "$tmp/crosstalk"
+fetch "$BASE/bin/SHA256SUMS" "$tmp/SHA256SUMS"
 
 want=$(awk -v b="$bin" '$2 == b { print $1 }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || { echo "install.sh: $bin not in checksum manifest" >&2; exit 1; }
@@ -88,8 +117,13 @@ if [ -z "$TOKEN" ]; then
     exit 1
 fi
 
+# The token goes to register in its environment, not as an argument.
 echo "==> registering alias \"$ALIAS\" -> $HOST:$PORT"
-"$dest/crosstalk" register "$HOST" "$PORT" "$ALIAS" --token "$TOKEN"
+if [ -n "$FINGERPRINT" ]; then
+    CROSSTALK_TOKEN="$TOKEN" "$dest/crosstalk" register "$HOST" "$PORT" "$ALIAS" --fingerprint "$FINGERPRINT"
+else
+    CROSSTALK_TOKEN="$TOKEN" "$dest/crosstalk" register "$HOST" "$PORT" "$ALIAS"
+fi
 
 # Confirm the connection end-to-end so a bad token or unreachable server is
 # caught right here, not on first use.

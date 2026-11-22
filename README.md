@@ -61,6 +61,19 @@ curl -fsSLk https://<server-ip>:27677/install.sh | sh -s -- --token <TOKEN> --al
 `crosstalk` with no arguments opens the TUI; `crosstalk update` self-updates
 from the server.
 
+If you already know the server's certificate (`./run.sh fingerprint`), that
+line can be closed against anyone in between — nothing is trusted on first
+use, and the token is not on a command line:
+
+```sh
+CROSSTALK_TOKEN=<TOKEN> sh -c 'curl -fsSLk --pinnedpubkey "sha256//<key>" https://<server-ip>:27677/install.sh \
+  | sh -s -- --alias hub --fingerprint <sha256> --pin "sha256//<key>"'
+```
+
+(`--pin` is the certificate's public key in curl's form; `--fingerprint` is the
+certificate itself, the value `register` stores. lv_hub, which can host
+crosstalk, writes this line for you.)
+
 ## Wiring in an agent
 
 The binary teaches its own contract. `crosstalk rules` prints the canonical
@@ -138,12 +151,26 @@ crosstalkd -config crosstalkd.toml
 
 First boot generates a self-signed TLS certificate next to the config and
 logs its fingerprint. All conversation state is in-memory; only the cert and
-config persist.
+config persist. The copyable install line, which carries the token, is
+printed only when stderr is a terminal — never into a service's log.
+
+Optionally, one front end that speaks for signed-in people (lv_hub) gets a
+token of its own and a hostname nothing else can join under:
+
+```toml
+operator_token    = "<another secret>"
+operator_hostname = "hub"
+```
+
+With these set, only that token can join as `hub/…` — in any case, and in
+any spelling that merely looks like it: a hostname that is not plain ASCII is
+kept for the operator as well.
 
 ## Use the client
 
 ```sh
 crosstalk register 127.0.0.1 27677 hub --token <TOKEN>   # TOFU cert pinning
+crosstalk register 127.0.0.1 27677 hub --fingerprint <sha256>   # pin a known cert; token from $CROSSTALK_TOKEN
 crosstalk join  'ai#42' --name worker-3 --task "porting VNNI kernel"
 crosstalk send  'ai#42' "layer 14 done — @oracle please review"
 crosstalk wait  'ai#42' --timeout 300  # exit 0: messages printed · 2: nothing new

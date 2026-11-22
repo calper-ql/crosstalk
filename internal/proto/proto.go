@@ -180,4 +180,7 @@ const (
 	ErrUnauthorized     = "unauthorized"
 	ErrProtoUnsupported = "proto_unsupported"
 	ErrNotFound         = "not_found"
+	// ErrForbidden: the token is good, but not for this — a hostname or a pid
+	// that belongs to the operator (see server.API).
+	ErrForbidden = "forbidden"
 )
