@@ -41,6 +41,10 @@ type API struct {
 
 	failMu   sync.Mutex
 	failures map[string]*tokenBucket // per-source-IP auth-failure limiter
+
+	// What bounds the memory files can take outside the hub's caps: how many
+	// may be arriving, and how many leaving, at once (filesapi.go).
+	uploads, downloads *gate
 }
 
 type ctxKey int
@@ -78,10 +82,16 @@ func (a *API) reserved(hostname string) bool {
 	return false
 }
 
+// foreignOperatorPID reports a pid that belongs to the operator in a request
+// that does not.
+func (a *API) foreignOperatorPID(r *http.Request, room, pid string) bool {
+	return a.OperatorToken != "" && !isOperator(r) && a.Hub.OperatorPID(room, pid)
+}
+
 // guardPID refuses a pid that belongs to the operator to anyone else. It
 // writes the response itself and returns false when it refuses.
 func (a *API) guardPID(w http.ResponseWriter, r *http.Request, room, pid string) bool {
-	if a.OperatorToken == "" || isOperator(r) || !a.Hub.OperatorPID(room, pid) {
+	if !a.foreignOperatorPID(r, room, pid) {
 		return true
 	}
 	log.Printf("auth: operator pid presented without the operator token from %s (%s %s)", sourceIP(r), r.Method, r.URL.Path)
@@ -90,7 +100,11 @@ func (a *API) guardPID(w http.ResponseWriter, r *http.Request, room, pid string)
 }
 
 func NewAPI(hub *Hub, token string) *API {
-	return &API{Hub: hub, Token: token, failures: make(map[string]*tokenBucket)}
+	return &API{
+		Hub: hub, Token: token, failures: make(map[string]*tokenBucket),
+		uploads:   newGate(maxUploads, maxUploadsPerSource),
+		downloads: newGate(maxDownloads, maxDownloadsPerSrc),
+	}
 }
 
 // Handler returns the full route table. Distribution endpoints (/install.sh,
@@ -100,7 +114,9 @@ func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, proto.VersionResponse{Version: proto.Version, Build: proto.Build, Proto: proto.ProtoVersion})
+		writeJSON(w, http.StatusOK, proto.VersionResponse{
+			Version: proto.Version, Build: proto.Build, Proto: proto.ProtoVersion, MaxFile: a.Hub.MaxFile(),
+		})
 	})
 	mux.HandleFunc("GET /install.sh", handleInstallScript)
 	mux.HandleFunc("GET /bin/{file}", handleBinary)
@@ -108,6 +124,8 @@ func (a *API) Handler() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("POST /api/rooms/{room}/join", a.handleJoin)
 	api.HandleFunc("POST /api/rooms/{room}/messages", a.handleSend)
+	api.HandleFunc("POST /api/rooms/{room}/files", a.handleSendFile)
+	api.HandleFunc("GET /api/rooms/{room}/files/{id}", a.handleFile)
 	api.HandleFunc("GET /api/rooms/{room}/events", a.handleEvents)
 	api.HandleFunc("GET /api/rooms/{room}/history", a.handleHistory)
 	api.HandleFunc("GET /api/rooms/{room}/participants", func(w http.ResponseWriter, r *http.Request) {

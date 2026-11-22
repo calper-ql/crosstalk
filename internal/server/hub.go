@@ -27,6 +27,11 @@ type Config struct {
 	Burst      float64       // token-bucket burst per pid
 	MaxBody    int           // max message body bytes
 	MaxWait    time.Duration // cap on the events long-poll hold
+
+	// Files (files.go). All in bytes, all of it memory.
+	MaxFile    int   // largest file a message may carry; negative: no files
+	RoomFiles  int64 // what one room's files may add up to (oldest evicted)
+	TotalFiles int64 // what all rooms' files may add up to (oldest evicted)
 }
 
 func (c *Config) fillDefaults() {
@@ -50,6 +55,21 @@ func (c *Config) fillDefaults() {
 	}
 	if c.MaxWait == 0 {
 		c.MaxWait = 30 * time.Second
+	}
+	if c.MaxFile == 0 {
+		c.MaxFile = 25 << 20
+	}
+	if c.RoomFiles == 0 {
+		c.RoomFiles = 128 << 20
+	}
+	if c.TotalFiles == 0 {
+		c.TotalFiles = 512 << 20
+	}
+	// A file has to fit in its room, and a room in the server: otherwise a
+	// file within the cap could never be kept at all.
+	if c.MaxFile > 0 {
+		c.RoomFiles = max(c.RoomFiles, int64(c.MaxFile))
+		c.TotalFiles = max(c.TotalFiles, c.RoomFiles)
 	}
 }
 
@@ -94,6 +114,12 @@ type room struct {
 	participants map[string]*participant
 	waiters      map[string]chan struct{} // parked polls, one per pid
 	closed       bool                     // tombstone: GC'd, deleted next sweep
+
+	// The files its messages carry (files.go): by id, the ids oldest first,
+	// and what they add up to.
+	files     map[string]*storedFile
+	fileOrder []string
+	fileBytes int64
 }
 
 // Hub is the whole server state. All maps are guarded by mu; long-poll
@@ -104,6 +130,8 @@ type Hub struct {
 	rooms map[string]*room
 	ulid  *proto.ULIDGen
 	now   func() time.Time // test seam
+
+	fileBytes int64 // every room's files together
 }
 
 func NewHub(cfg Config) *Hub {
@@ -154,6 +182,12 @@ func (h *Hub) append(r *room, ev proto.Event) proto.Event {
 	r.events = append(r.events, ev)
 	if len(r.events) > h.cfg.RoomCap {
 		over := len(r.events) - h.cfg.RoomCap
+		// A file is part of its message: it goes when the message does.
+		for _, old := range r.events[:over] {
+			if old.File != nil {
+				h.dropFile(r, old.File.ID)
+			}
+		}
 		r.events = append([]proto.Event(nil), r.events[over:]...)
 		r.evicted = true
 	}
@@ -227,7 +261,7 @@ func (h *Hub) Send(roomName, pid, body, kind string) (proto.Event, []string, err
 	}
 	if len(body) > h.cfg.MaxBody {
 		return proto.Event{}, nil, &apiError{413, proto.ErrTooLarge,
-			fmt.Sprintf("message body is %d bytes; the cap is %d — put large content in a file or the issue and reference it by path", len(body), h.cfg.MaxBody), 0}
+			fmt.Sprintf("message body is %d bytes; the cap is %d — send large content as a file (crosstalk send <room> --file <path>), or put it in the issue and reference it", len(body), h.cfg.MaxBody), 0}
 	}
 	if strings.TrimSpace(body) == "" {
 		return proto.Event{}, nil, &apiError{400, proto.ErrBadRequest, "empty message body", 0}
@@ -469,6 +503,7 @@ func (h *Hub) Sweep() []string {
 		}
 		if h.now().Sub(r.lastMessage) >= h.cfg.IdleExpiry {
 			r.closed = true
+			h.dropFiles(r) // now, not a sweep later: nothing can reach them any more
 			expired = append(expired, name)
 			for pid, ch := range r.waiters {
 				close(ch)

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -55,6 +56,9 @@ func NewConn(e ServerEntry) *Conn {
 			Transport: &http.Transport{
 				TLSClientConfig:       pinnedTLSConfig(e.Fingerprint),
 				ResponseHeaderTimeout: 60 * time.Second,
+				// For a file: the server answers the headers before the body
+				// is sent (SendFile sets Expect), so a refusal costs nothing.
+				ExpectContinueTimeout: 5 * time.Second,
 			},
 		},
 	}
@@ -146,25 +150,32 @@ func (c *Conn) do(method, path string, query url.Values, body, out any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		var eb proto.ErrorBody
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-		_ = json.Unmarshal(data, &eb)
-		if eb.Error == "" {
-			eb.Error = "http_error"
-			eb.Message = string(data)
-		}
-		ae := &APIError{Status: resp.StatusCode, Code: eb.Error, Message: eb.Message}
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if secs, err := strconv.Atoi(ra); err == nil {
-				ae.RetryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return ae
+		return apiError(resp)
 	}
 	if out == nil {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// apiError reads a non-2xx response into an APIError. A body that is not the
+// server's JSON (a route an older server does not have) comes back under the
+// code "http_error".
+func apiError(resp *http.Response) *APIError {
+	var eb proto.ErrorBody
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	_ = json.Unmarshal(data, &eb)
+	if eb.Error == "" {
+		eb.Error = "http_error"
+		eb.Message = strings.TrimSpace(string(data))
+	}
+	ae := &APIError{Status: resp.StatusCode, Code: eb.Error, Message: eb.Message}
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil {
+			ae.RetryAfter = time.Duration(secs) * time.Second
+		}
+	}
+	return ae
 }
 
 func roomPath(room, suffix string) string {
@@ -181,6 +192,76 @@ func (c *Conn) Send(room, pid, body, kind string) (proto.SendResponse, error) {
 	var out proto.SendResponse
 	err := c.do("POST", roomPath(room, "/messages"), nil, proto.SendRequest{PID: pid, Body: body, Kind: kind}, &out)
 	return out, err
+}
+
+// SendFile posts a message that carries a file: body is its caption (it may
+// be empty), name what the file is called. Who is sending goes in the query
+// and the bytes are the request body — see the proto package.
+func (c *Conn) SendFile(room, pid, body, name string, data []byte) (proto.SendResponse, error) {
+	var out proto.SendResponse
+	q := url.Values{}
+	q.Set("pid", pid)
+	q.Set("name", name)
+	if body != "" {
+		q.Set("body", body)
+	}
+	req, err := http.NewRequest("POST", c.base+roomPath(room, "/files")+"?"+q.Encode(), bytes.NewReader(data))
+	if err != nil {
+		return out, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Crosstalk-Proto", proto.ProtoVersion)
+	req.Header.Set("Content-Type", "application/octet-stream")
+	// The server can refuse on the request's head alone; with this it is asked
+	// before the bytes are sent rather than after.
+	req.Header.Set("Expect", "100-continue")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return out, apiError(resp)
+	}
+	return out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
+// File fetches a file a message carried: its bytes, and the name and type
+// the server holds for it. limit bounds what is read; a file larger than it
+// is an error, not a truncation.
+func (c *Conn) File(room, id string, limit int64) (proto.File, []byte, error) {
+	req, err := http.NewRequest("GET", c.base+roomPath(room, "/files/"+url.PathEscape(id)), nil)
+	if err != nil {
+		return proto.File{}, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Crosstalk-Proto", proto.ProtoVersion)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return proto.File{}, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return proto.File{}, nil, apiError(resp)
+	}
+	if resp.ContentLength > limit {
+		return proto.File{}, nil, fmt.Errorf("the file is %d bytes, more than the %d this client will take", resp.ContentLength, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return proto.File{}, nil, fmt.Errorf("the file did not arrive whole: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return proto.File{}, nil, fmt.Errorf("the file is more than the %d bytes this client will take", limit)
+	}
+	if resp.ContentLength >= 0 && int64(len(data)) != resp.ContentLength {
+		return proto.File{}, nil, fmt.Errorf("the file did not arrive whole: %d of %d bytes", len(data), resp.ContentLength)
+	}
+	meta := proto.File{ID: id, Size: int64(len(data)), Type: resp.Header.Get("X-Crosstalk-File-Type")}
+	if _, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); err == nil {
+		meta.Name = params["filename"]
+	}
+	return meta, data, nil
 }
 
 func (c *Conn) SetTask(room, pid, task string) error {

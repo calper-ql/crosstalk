@@ -118,10 +118,18 @@ func renderEvent(ev proto.Event, me self) string {
 		if ev.Kind != "" && ev.Kind != proto.KindText {
 			who += " [" + ev.Kind + "]"
 		}
+		// In the head of the line, where a body cannot put one: a body's own
+		// lines are indented, so text that looks like this tag is only text.
+		if ev.File != nil {
+			who += " [" + fileTag(ev.File) + "]"
+		}
 		if me.addressed(ev) {
 			who += " → you"
 		}
 		body := strings.TrimRight(ev.Body, "\n")
+		if body == "" && ev.File != nil { // a file with no caption
+			return fmt.Sprintf("[%s] %s", ts, who)
+		}
 		if !strings.Contains(body, "\n") {
 			return fmt.Sprintf("[%s] %s: %s", ts, who, body)
 		}
@@ -152,6 +160,12 @@ func renderEvent(ev proto.Event, me self) string {
 	}
 	b, _ := json.Marshal(ev)
 	return string(b)
+}
+
+// fileTag is a file as one line of text carries it: the id to fetch it by,
+// its name, its size, and what the server found in it.
+func fileTag(f *proto.File) string {
+	return fmt.Sprintf("file %s %q %s %s", f.ID, f.Name, proto.HumanSize(f.Size), f.Type)
 }
 
 func mentionList(ms []proto.Mention) string {

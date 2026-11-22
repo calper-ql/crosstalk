@@ -42,6 +42,13 @@ type fileConfig struct {
 	Burst          float64 `toml:"burst"`
 	MaxBodyKiB     int     `toml:"max_body_kib"`
 	MaxWaitSecs    int     `toml:"max_wait_seconds"`
+
+	// Files a message may carry, all held in memory (server/files.go): the
+	// largest one (negative: take no files), what one room's may add up to,
+	// and what all rooms' may. Zero means the default: 25, 128, 512.
+	MaxFileMiB    int `toml:"max_file_mib"`
+	RoomFilesMiB  int `toml:"room_files_mib"`
+	TotalFilesMiB int `toml:"total_files_mib"`
 }
 
 func main() {
@@ -86,6 +93,9 @@ func main() {
 		Burst:      cfg.Burst,
 		MaxBody:    cfg.MaxBodyKiB * 1024,
 		MaxWait:    time.Duration(cfg.MaxWaitSecs) * time.Second,
+		MaxFile:    cfg.MaxFileMiB << 20,
+		RoomFiles:  int64(cfg.RoomFilesMiB) << 20,
+		TotalFiles: int64(cfg.TotalFilesMiB) << 20,
 	})
 	stop := make(chan struct{})
 	go hub.RunGC(stop, log.Printf)
@@ -113,6 +123,11 @@ func main() {
 	log.Printf("certificate fingerprint: %s", server.FormatFingerprint(server.Fingerprint(cert)))
 	if cfg.OperatorHostname != "" {
 		log.Printf("operator: the hostname %q is reserved for the operator token", cfg.OperatorHostname)
+	}
+	if n := hub.MaxFile(); n > 0 {
+		log.Printf("files: up to %d MiB each, held in memory only", n>>20)
+	} else {
+		log.Printf("files: off (max_file_mib is negative)")
 	}
 
 	// The copyable lines carry the token, so they go to a person at a

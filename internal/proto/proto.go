@@ -3,7 +3,10 @@
 // emits as NDJSON, so there is exactly one format everywhere.
 package proto
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // ProtoVersion is sent in the X-Crosstalk-Proto header on every API request.
 const ProtoVersion = "1"
@@ -78,8 +81,36 @@ type Mention struct {
 	All      bool   `json:"all,omitempty"`
 }
 
+// File describes the file a message carries: its name, its size in bytes,
+// and Type — what the server found in the bytes (a media type, as
+// net/http's sniffing names it), never what the sender claimed. The bytes
+// themselves are fetched separately, by ID, and are held in the server's
+// memory only: they go when the room does, and earlier when newer files
+// need the space.
+type File struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+	Type string `json:"type"`
+}
+
+// HumanSize renders a byte count the way the limits are written: binary
+// units, one decimal where it says something.
+func HumanSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f KiB", float64(n)/1024)
+	case n < 1024*1024*1024:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1024*1024*1024))
+}
+
 // Event is a single room event. Fields are populated by type:
-// message: From, Body, Kind, Mentions; presence: Event, Who;
+// message: From, Body, Kind, Mentions, and File when it carries one (the
+// body is then its caption, and may be empty); presence: Event, Who;
 // room_closed: Reason.
 type Event struct {
 	Type     string    `json:"type"`
@@ -89,6 +120,7 @@ type Event struct {
 	Body     string    `json:"body,omitempty"`
 	Kind     string    `json:"kind,omitempty"`
 	Mentions []Mention `json:"mentions,omitempty"`
+	File     *File     `json:"file,omitempty"`
 	Event    string    `json:"event,omitempty"`
 	Who      *Identity `json:"who,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
@@ -117,12 +149,23 @@ type SendRequest struct {
 }
 
 // SendResponse echoes who the message reached: the resolved mentions, and
-// any @-tokens that matched nobody (so nobody was notified for them).
+// any @-tokens that matched nobody (so nobody was notified for them). File
+// is set when the message carried one: the server's description of it.
 type SendResponse struct {
 	ID         string    `json:"id"`
 	Mentions   []Mention `json:"mentions,omitempty"`
 	Unresolved []string  `json:"unresolved,omitempty"`
+	File       *File     `json:"file,omitempty"`
 }
+
+// A message with a file is sent as
+//
+//	POST /api/rooms/{room}/files?pid=<pid>&name=<file name>&body=<caption>
+//
+// with the file's bytes as the request body and their count in
+// Content-Length, which is required. Who is sending and how much is in the
+// request's head, so the server can refuse before it reads the file, and
+// reads exactly what it was told to expect.
 
 type TaskRequest struct {
 	PID  string `json:"pid"`
@@ -152,10 +195,14 @@ type ParticipantInfo struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// VersionResponse identifies the server. MaxFile is the largest file, in
+// bytes, a message may carry; zero (or absent, from a server that predates
+// files) means this server takes none.
 type VersionResponse struct {
 	Version string `json:"version"`
 	Build   string `json:"build,omitempty"`
 	Proto   string `json:"proto"`
+	MaxFile int64  `json:"max_file,omitempty"`
 }
 
 // ErrorBody is the JSON body of every non-2xx API response. Error is a

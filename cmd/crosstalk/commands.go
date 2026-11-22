@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -260,8 +261,13 @@ const maxPacingWait = 15 * time.Second
 // of failing: the limit exists to pace agents to human reading speed, and
 // waiting is exactly that.
 func sendPaced(conn *client.Conn, s client.Session, body, kind string) (proto.SendResponse, error) {
+	return paced(func() (proto.SendResponse, error) { return conn.Send(s.Room, s.PID, body, kind) })
+}
+
+// paced runs one send, a message or a file, the way sendPaced describes.
+func paced(send func() (proto.SendResponse, error)) (proto.SendResponse, error) {
 	for attempt := 0; ; attempt++ {
-		resp, err := conn.Send(s.Room, s.PID, body, kind)
+		resp, err := send()
 		var ae *client.APIError
 		if attempt < 3 && errors.As(err, &ae) && ae.Code == proto.ErrRateLimited &&
 			ae.RetryAfter > 0 && ae.RetryAfter <= maxPacingWait {
@@ -285,11 +291,18 @@ func warnUnresolved(tokens []string, ref string) {
 func cmdSend(args []string) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	kind := fs.String("kind", proto.KindText, "text | status | code")
+	file := fs.String("file", "", "send this file with the message; the body is then its caption, and optional")
 	as := fs.String("as", "", asUsage)
 	format := formatFlag(fs)
-	pos, err := parseArgs("send", args, 2, -1, fs)
+	pos, err := parseArgs("send", args, 1, -1, fs)
 	if err != nil {
 		return err
+	}
+	if len(pos) < 2 && *file == "" {
+		return fmt.Errorf("send: nothing to send: give a body, or a file with --file — usage: %s", usageLine("send"))
+	}
+	if *file != "" && *kind != proto.KindText {
+		return errors.New("send: --kind does not go with --file: a file's caption is plain text")
 	}
 	p, err := newPrinter(*format)
 	if err != nil {
@@ -311,19 +324,81 @@ func cmdSend(args []string) error {
 		return err
 	}
 	var resp proto.SendResponse
-	err = a.do(func(s client.Session) (err error) {
-		resp, err = sendPaced(a.conn, s, body, *kind)
-		return err
-	})
-	if err != nil {
-		return err
+	if *file != "" {
+		name, data, err := client.ReadFileToSend(a.conn, *file)
+		if err != nil {
+			return fmt.Errorf("send: --file: %w", err)
+		}
+		err = a.do(func(s client.Session) (err error) {
+			resp, err = paced(func() (proto.SendResponse, error) {
+				return a.conn.SendFile(s.Room, s.PID, body, name, data)
+			})
+			return err
+		})
+		if err != nil {
+			return client.FileErr(err)
+		}
+	} else {
+		err = a.do(func(s client.Session) (err error) {
+			resp, err = sendPaced(a.conn, s, body, *kind)
+			return err
+		})
+		if err != nil {
+			return err
+		}
 	}
 	text := "sent"
+	if resp.File != nil {
+		text += " · " + fileTag(resp.File)
+	}
 	if len(resp.Mentions) > 0 {
 		text += " · notified " + mentionList(resp.Mentions)
 	}
 	p.emit(resp, text)
 	warnUnresolved(resp.Unresolved, pos[0])
+	return nil
+}
+
+// fetched is what fetch prints: the server's description of the file, and
+// where its bytes now are.
+type fetched struct {
+	proto.File
+	Path string `json:"path"`
+}
+
+func cmdFetch(args []string) error {
+	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
+	out := fs.String("out", "", "write the file here (a new file's path) instead of under ~/.crosstalk/files")
+	format := formatFlag(fs)
+	pos, err := parseArgs("fetch", args, 2, 2, fs)
+	if err != nil {
+		return err
+	}
+	p, err := newPrinter(*format)
+	if err != nil {
+		return err
+	}
+	_, room, conn, err := connFor(pos[0])
+	if err != nil {
+		return err
+	}
+	meta, data, err := conn.Fetch(room, pos[1])
+	if err != nil {
+		return err
+	}
+	path := *out
+	if path == "" {
+		path, err = client.SaveFetched(meta, data)
+	} else {
+		err = client.SaveFetchedAs(path, data)
+	}
+	if err != nil {
+		return fmt.Errorf("fetch: %w", err)
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	p.emit(fetched{meta, path}, fmt.Sprintf("saved %s — %q, %s, %s", path, meta.Name, proto.HumanSize(meta.Size), meta.Type))
 	return nil
 }
 

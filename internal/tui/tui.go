@@ -12,6 +12,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -226,6 +227,13 @@ type partsMsg struct {
 type sentMsg struct {
 	room string
 	err  error
+	file string // the name of the file sent, when it was one
+}
+
+// savedMsg reports a /save: where the file went, or why it did not.
+type savedMsg struct {
+	path string
+	err  error
 }
 
 // ── commands ────────────────────────────────────────────────────────────
@@ -293,8 +301,72 @@ func fetchParts(c *client.Conn, room string) tea.Cmd {
 func sendMessage(c *client.Conn, room, pid, body string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := c.Send(room, pid, body, proto.KindText)
-		return sentMsg{room, err}
+		return sentMsg{room: room, err: err}
 	}
+}
+
+// sendFile reads the file at path and posts it with its caption.
+func sendFile(c *client.Conn, room, pid, path, caption string) tea.Cmd {
+	return func() tea.Msg {
+		name, data, err := client.ReadFileToSend(c, path)
+		if err == nil {
+			_, err = c.SendFile(room, pid, caption, name, data)
+			err = client.FileErr(err)
+		}
+		return sentMsg{room: room, err: err, file: name}
+	}
+}
+
+// saveFile fetches a file a message carried into ~/.crosstalk/files.
+func saveFile(c *client.Conn, room, id string) tea.Cmd {
+	return func() tea.Msg {
+		meta, data, err := c.Fetch(room, id)
+		if err != nil {
+			return savedMsg{err: err}
+		}
+		path, err := client.SaveFetched(meta, data)
+		return savedMsg{path, err}
+	}
+}
+
+// slashCommand recognises the two lines the input treats as commands rather
+// than messages — "/file <path> [caption]" and "/save [file-id]" — and
+// nothing else: any other line, whatever it starts with, is a message.
+func slashCommand(line string) (cmd, arg, rest string, ok bool) {
+	cmd, tail, _ := strings.Cut(strings.TrimSpace(line), " ")
+	if cmd != "/file" && cmd != "/save" {
+		return "", "", "", false
+	}
+	tail = strings.TrimSpace(tail)
+	// A path with spaces goes in double quotes.
+	if strings.HasPrefix(tail, `"`) {
+		if end := strings.Index(tail[1:], `"`); end >= 0 {
+			return cmd, tail[1 : 1+end], strings.TrimSpace(tail[2+end:]), true
+		}
+	}
+	arg, rest, _ = strings.Cut(tail, " ")
+	return cmd, arg, strings.TrimSpace(rest), true
+}
+
+// expandHome turns a leading ~/ into the home directory: the input is not a
+// shell, and a person types paths the way a shell takes them.
+func expandHome(path string) string {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
+}
+
+// lastFileID finds the newest file in a room's loaded events.
+func lastFileID(events []proto.Event) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].File != nil {
+			return events[i].File.ID
+		}
+	}
+	return ""
 }
 
 func ringBell() tea.Msg {
@@ -428,8 +500,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case sentMsg:
-		if msg.err != nil {
+		switch {
+		case msg.err != nil:
 			m.status = "send: " + msg.err.Error()
+		case msg.file != "":
+			m.status = "sent " + msg.file // in place of "sending …", which would otherwise stay
+		}
+		return m, nil
+
+	case savedMsg:
+		if msg.err != nil {
+			m.status = "save: " + msg.err.Error()
+		} else {
+			m.status = "saved " + msg.path
 		}
 		return m, nil
 	}
@@ -529,6 +612,25 @@ func (m model) updateKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.ta.Reset()
+		if cmd, arg, rest, ok := slashCommand(body); ok {
+			switch {
+			case cmd == "/file" && arg == "":
+				m.status = "/file <path> [caption] — sends a file to this room"
+				return m, nil
+			case cmd == "/file":
+				m.status = "sending " + arg + "…"
+				return m, sendFile(m.conn, rv.name, rv.pid, expandHome(arg), rest)
+			}
+			if arg == "" { // /save alone: the newest file here
+				arg = lastFileID(rv.events)
+			}
+			if arg == "" {
+				m.status = "/save [file-id] — no message here carries a file"
+				return m, nil
+			}
+			m.status = "saving…"
+			return m, saveFile(m.conn, rv.name, arg)
+		}
 		return m, sendMessage(m.conn, rv.name, rv.pid, body)
 	case msg.Type == tea.KeyEnter && msg.Alt:
 		m.ta.InsertString("\n")

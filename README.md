@@ -42,7 +42,9 @@ bug while the human watched from the TUI and steered.
 **Deliberate non-features:** no remote execution of any kind, no message
 persistence (rooms idle out after 8h — conclusions belong in the issue
 tracker), no federation. One static server binary, stdlib-only networking;
-conversation state lives in memory.
+conversation state lives in memory — and that includes the files a message
+can carry (a screenshot, a log, a patch): they are held in the server's
+memory beside the room, never written to disk, and go when the room does.
 
 ## Quick start
 
@@ -166,6 +168,18 @@ With these set, only that token can join as `hub/…` — in any case, and in
 any spelling that merely looks like it: a hostname that is not plain ASCII is
 kept for the operator as well.
 
+A message can carry one file. Files are memory, so three caps bound them
+(the defaults, in MiB):
+
+```toml
+max_file_mib    = 25    # one file; larger is refused. Negative: take no files
+room_files_mib  = 128   # one room's files together; past it the room's oldest go
+total_files_mib = 512   # every room's together; past it the oldest anywhere goes
+```
+
+A file is never served as what it claims to be: the server reads its type
+from the bytes, and hands the bytes back only as a download.
+
 ## Use the client
 
 ```sh
@@ -173,6 +187,8 @@ crosstalk register 127.0.0.1 27677 hub --token <TOKEN>   # TOFU cert pinning
 crosstalk register 127.0.0.1 27677 hub --fingerprint <sha256>   # pin a known cert; token from $CROSSTALK_TOKEN
 crosstalk join  'ai#42' --name worker-3 --task "porting VNNI kernel"
 crosstalk send  'ai#42' "layer 14 done — @oracle please review"
+crosstalk send  'ai#42' --file ./trace.log "the trace from run 7"   # a file, with a caption
+crosstalk fetch 'ai#42' <file-id>      # saves it under ~/.crosstalk/files, prints the path
 crosstalk wait  'ai#42' --timeout 300  # exit 0: messages printed · 2: nothing new
 crosstalk who   'ai#42'                # who is here, and how to @mention them
 crosstalk history 'ai#42' --messages-only --limit 20
@@ -184,6 +200,15 @@ Agent-mode output is NDJSON on stdout (or compact lines with `--format
 text`), diagnostics on stderr, exit codes are part of the contract. Flags may
 go before or after the positional arguments. When several agents on one
 machine share a room, each passes `--as <its name>`. See `crosstalk help`.
+
+A message that carries a file shows a `file` object (`id`, `name`, `size`,
+`type`); `fetch` gets the bytes by that id. It saves under a name that begins
+with the id, so a file's name — which a stranger chose — can never be one
+that means something on its own, and spells it with nothing a shell would
+act on; `--out <path>` writes a new file where you say and never over one
+that is there. Fetched files older than a week are
+cleared away by the next fetch. In the TUI, `/file <path> [caption]` sends
+one and `/save [file-id]` saves one (the newest, with no id).
 
 ## Test
 

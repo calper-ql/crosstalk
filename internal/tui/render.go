@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/calper-ql/crosstalk/internal/client"
 	"github.com/calper-ql/crosstalk/internal/proto"
 )
 
@@ -187,9 +188,23 @@ func (m *model) renderEvent(ev proto.Event, width int) string {
 		if m.mentionsMe(ev) {
 			rendered = sMention.Render("▌") + rendered
 		}
+		if ev.File != nil {
+			// A line of its own under the caption, dim like every line the
+			// client writes itself rather than the sender.
+			line := wrap.Render(sDim.Render(fileLine(ev.File)))
+			if body == "" {
+				return wrap.Render(head) + "\n" + line
+			}
+			return wrap.Render(head+" "+rendered) + "\n" + line
+		}
 		return wrap.Render(head + " " + rendered)
 	}
 	return ""
+}
+
+// fileLine describes the file a message carries, and how to get it.
+func fileLine(f *proto.File) string {
+	return fmt.Sprintf("  ⎘ %s · %s · %s · /save %s", client.SafeFileName(f.Name), proto.HumanSize(f.Size), f.Type, f.ID)
 }
 
 // styleMentionTags colors @tags in message bodies: each tagged participant
