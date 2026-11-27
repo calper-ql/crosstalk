@@ -168,6 +168,19 @@ With these set, only that token can join as `hub/…` — in any case, and in
 any spelling that merely looks like it: a hostname that is not plain ASCII is
 kept for the operator as well.
 
+The operator token can also **lock the server down** (`POST /api/lockdown`):
+every room, message and file is dropped, every request being served is cut,
+and from then on the server answers nothing but `/version`, which says
+`"locked": true`. No request lifts it. The lock is a file, `lockdown`, beside
+the certificate, so a restart does not lift it either:
+
+```sh
+touch <state dir>/lockdown    # lock it yourself: then restart crosstalkd
+rm <state dir>/lockdown       # unlock: then restart crosstalkd
+```
+
+The fleet token cannot lock the server: it is on every machine.
+
 A message can carry one file. Files are memory, so three caps bound them
 (the defaults, in MiB):
 

@@ -203,6 +203,15 @@ type VersionResponse struct {
 	Build   string `json:"build,omitempty"`
 	Proto   string `json:"proto"`
 	MaxFile int64  `json:"max_file,omitempty"`
+	// Locked says the server is locked down: it answers this and nothing else.
+	Locked bool `json:"locked,omitempty"`
+}
+
+// LockdownResponse answers POST /api/lockdown. Kept says the lock was written
+// to disk, so that a restart of the server will not lift it.
+type LockdownResponse struct {
+	Locked bool `json:"locked"`
+	Kept   bool `json:"kept"`
 }
 
 // ErrorBody is the JSON body of every non-2xx API response. Error is a
@@ -230,4 +239,7 @@ const (
 	// ErrForbidden: the token is good, but not for this — a hostname or a pid
 	// that belongs to the operator (see server.API).
 	ErrForbidden = "forbidden"
+	// ErrLockedDown: the server was locked down by its operator and answers
+	// nothing until someone at its machine unlocks it (server/lockdown.go).
+	ErrLockedDown = "locked_down"
 )

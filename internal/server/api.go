@@ -35,7 +35,8 @@ type API struct {
 	// gets works only with that token.
 	//
 	// The operator token is accepted wherever the fleet token is. It is not an
-	// admin credential: it can do nothing more than join under its hostname.
+	// admin credential: beyond joining under its hostname it can do one thing
+	// the fleet's cannot, which is lock the server down (lockdown.go).
 	OperatorToken    string
 	OperatorHostname string
 
@@ -45,6 +46,11 @@ type API struct {
 	// What bounds the memory files can take outside the hub's caps: how many
 	// may be arriving, and how many leaving, at once (filesapi.go).
 	uploads, downloads *gate
+
+	// Lockdown (lockdown.go). LockPath is the file that keeps the server
+	// locked over a restart; empty, a lock lasts as long as the process.
+	LockPath string
+	lock     lockState
 }
 
 type ctxKey int
@@ -113,11 +119,7 @@ func NewAPI(hub *Hub, token string) *API {
 func (a *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, proto.VersionResponse{
-			Version: proto.Version, Build: proto.Build, Proto: proto.ProtoVersion, MaxFile: a.Hub.MaxFile(),
-		})
-	})
+	mux.HandleFunc("GET /version", a.handleVersion)
 	mux.HandleFunc("GET /install.sh", handleInstallScript)
 	mux.HandleFunc("GET /bin/{file}", handleBinary)
 
@@ -140,9 +142,18 @@ func (a *API) Handler() http.Handler {
 	api.HandleFunc("POST /api/rooms/{room}/leave", a.handleLeave)
 	api.HandleFunc("GET /api/rooms", a.handleRooms)
 	api.HandleFunc("GET /api/rooms/{$}", a.handleRooms)
+	api.HandleFunc("POST /api/lockdown", a.handleLockdown)
 
 	mux.Handle("/api/", a.authenticate(api))
-	return mux
+	// Outermost: a locked server answers nothing these routes would.
+	return a.guard(mux)
+}
+
+func (a *API) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, proto.VersionResponse{
+		Version: proto.Version, Build: proto.Build, Proto: proto.ProtoVersion, MaxFile: a.Hub.MaxFile(),
+		Locked: a.Locked(),
+	})
 }
 
 // authenticate enforces the proto-version header and the global bearer

@@ -106,6 +106,10 @@ func main() {
 	}
 	api := server.NewAPI(hub, cfg.Token)
 	api.OperatorToken, api.OperatorHostname = cfg.OperatorToken, cfg.OperatorHostname
+	// Locked down (server/lockdown.go): while this file is there the server
+	// answers nothing, however many times it is started.
+	api.LockPath = filepath.Join(cfg.StateDir, server.LockFile)
+	locked := api.LoadLock()
 	srv := &http.Server{
 		Addr:    cfg.Bind,
 		Handler: api.Handler(),
@@ -123,6 +127,9 @@ func main() {
 	log.Printf("certificate fingerprint: %s", server.FormatFingerprint(server.Fingerprint(cert)))
 	if cfg.OperatorHostname != "" {
 		log.Printf("operator: the hostname %q is reserved for the operator token", cfg.OperatorHostname)
+	}
+	if locked {
+		log.Printf("LOCKED DOWN: %s is there. This server answers nothing until that file is removed and the server restarted", api.LockPath)
 	}
 	if n := hub.MaxFile(); n > 0 {
 		log.Printf("files: up to %d MiB each, held in memory only", n>>20)

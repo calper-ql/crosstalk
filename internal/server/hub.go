@@ -132,6 +132,9 @@ type Hub struct {
 	now   func() time.Time // test seam
 
 	fileBytes int64 // every room's files together
+
+	// locked is set by Lock (lockdown.go): no room is made after it.
+	locked bool
 }
 
 func NewHub(cfg Config) *Hub {
@@ -231,6 +234,9 @@ func (h *Hub) join(roomName string, id proto.Identity, remote string, operator b
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.locked {
+		return proto.JoinResponse{}, errLocked()
+	}
 
 	r := h.getRoom(roomName)
 	p := &participant{
